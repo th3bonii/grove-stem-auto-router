@@ -13,7 +13,7 @@
 
 Decision needed before apply: No
 Chained PRs recommended: Yes
-Chain strategy: pending
+Chain strategy: feature-branch-chain
 400-line budget risk: Medium
 
 ### Suggested Work Units
