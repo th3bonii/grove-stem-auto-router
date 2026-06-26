@@ -664,7 +664,7 @@ function R.Import.scan(dir)
     local i = 0
     while true do
         local filename = reaper.EnumerateFiles(dir, i)
-        if filename == "" then break end
+        if not filename or filename == "" then break end
         local ext = filename:lower():match("%.([^%.]+)$")
         if ext == "wav" or ext == "flac" or ext == "mp3" then
             stems[#stems + 1] = {
