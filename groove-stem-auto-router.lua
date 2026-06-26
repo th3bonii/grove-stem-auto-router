@@ -867,13 +867,17 @@ end
 -- ════════════════════════════════════════════════════════════════════════
 
 -- Detect calibration mode from command args
+-- GetCommandArgs was added in REAPER 6.73+; guard it for older versions
 local _is_calibrate = false
-local _cmd_args = reaper.GetCommandArgs()
-if _cmd_args then
-    for _, _arg in ipairs(_cmd_args) do
-        if _arg == "--calibrate" then
-            _is_calibrate = true
-            break
+local _get_cmd = reaper.GetCommandArgs
+if _get_cmd then
+    local _cmd_args = _get_cmd()
+    if _cmd_args then
+        for _, _arg in ipairs(_cmd_args) do
+            if _arg == "--calibrate" then
+                _is_calibrate = true
+                break
+            end
         end
     end
 end
