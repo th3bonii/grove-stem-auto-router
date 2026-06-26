@@ -552,50 +552,418 @@ end
 
 
 -- ════════════════════════════════════════════════════════════════════════
--- MODULE PLACEHOLDERS (future phases)
+-- CALIBRATION MODULE (Phase 2)
 -- ════════════════════════════════════════════════════════════════════════
 
--- Phase 2: Calibration System
--- R.Calibration = {}
+R.Calibration = {}
 
--- Phase 3: Matching Engine
--- R.Import = {}
+--- Load GUIDs from project ExtState.
+-- Reads SetProjExtState("GROVE_STEMS", "TargetGUIDs") and parses as JSON array.
+-- @return table { guid_string = true, ... } or nil if none stored
+function R.Calibration.load()
+    local ok, json_str = pcall(reaper.GetProjExtState, 0, "GROVE_STEMS", "TargetGUIDs")
+    if not ok or not json_str or json_str == "" then
+        return nil
+    end
+    local guids, err = R.parse_json(json_str)
+    if not guids or type(guids) ~= "table" then
+        reaper.ShowConsoleMsg("Grove: Invalid calibration data in ExtState: " .. tostring(err) .. "\n")
+        return nil
+    end
+    local guid_map = {}
+    for _, guid in ipairs(guids) do
+        if type(guid) == "string" and #guid > 0 then
+            guid_map[guid] = true
+        end
+    end
+    if not next(guid_map) then return nil end
+    return guid_map
+end
 
--- Phase 4: Overflow Dispatch
--- R.Overflow = {}
+--- Validate stored GUIDs against current REAPER project tracks.
+-- Wraps BR_GetMediaTrackByGUID in pcall for SWS-optional safety.
+-- @param guid_map table - { guid_string = true, ... } from load()
+-- @return (valid_map, stale_list)
+--   valid_map: { guid_string = REAPER_track, ... }
+--   stale_list: { guid_string, ... }
+function R.Calibration.validate(guid_map)
+    local valid = {}
+    local stale = {}
+    for guid in pairs(guid_map) do
+        local ok, track = pcall(reaper.BR_GetMediaTrackByGUID, 0, guid)
+        if ok and track then
+            local ret, name = pcall(reaper.GetTrackName, track, "")
+            if ret then
+                valid[guid] = track
+            else
+                stale[#stale + 1] = guid
+            end
+        else
+            stale[#stale + 1] = guid
+        end
+    end
+    if #stale > 0 then
+        reaper.ShowConsoleMsg("Grove: " .. #stale .. " stale calibration GUID(s) found. Falling back to name match for those.\n")
+    end
+    return valid, stale
+end
 
+--- Save selected track GUIDs to project ExtState as a JSON array.
+-- @param tracks array of REAPER track objects
+function R.Calibration.save(tracks)
+    local parts = {}
+    for _, track in ipairs(tracks) do
+        local ok, guid = pcall(reaper.GetTrackGUID, track)
+        if ok and guid then
+            parts[#parts + 1] = '"' .. guid .. '"'
+        end
+    end
+    if #parts == 0 then
+        reaper.ShowConsoleMsg("Grove: No track GUIDs to save.\n")
+        return
+    end
+    local json = "[" .. table.concat(parts, ",") .. "]"
+    reaper.SetProjExtState(0, "GROVE_STEMS", "TargetGUIDs", json)
+    reaper.ShowConsoleMsg("Grove: Calibration saved " .. #parts .. " track GUID(s).\n")
+end
+
+-- ════════════════════════════════════════════════════════════════════════
+-- IMPORT / MATCHING MODULE (Phase 3)
+-- ════════════════════════════════════════════════════════════════════════
+
+R.Import = {}
+
+--- Scan a directory for stem audio files (.wav, .flac, .mp3).
+-- Paths normalized to forward slashes.
+-- @param dir string - directory path
+-- @return array of { path = string, name = string }
+function R.Import.scan(dir)
+    dir = dir:gsub("\\", "/")
+    if dir:sub(-1) ~= "/" then
+        dir = dir .. "/"
+    end
+    local stems = {}
+    local i = 0
+    while true do
+        local filename = reaper.EnumerateFiles(dir, i)
+        if filename == "" then break end
+        local ext = filename:lower():match("%.([^%.]+)$")
+        if ext == "wav" or ext == "flac" or ext == "mp3" then
+            stems[#stems + 1] = {
+                path = dir .. filename:gsub("\\", "/"),
+                name = filename
+            }
+        end
+        i = i + 1
+    end
+    return stems
+end
+
+--- Normalize a stem filename to a canonical category name.
+-- Strips keywords_ignore tokens, applies alias substitution,
+-- falls back to the first remaining token.
+-- @param name string - original filename
+-- @param config table - merged route_map config
+-- @return string - canonical category name
+function R.Import.normalize(name, config)
+    -- Strip extension, normalize separators, lowercase
+    local base = name:gsub("%.[^%.]+$", "")
+    local cleaned = base:gsub("[_%-%.]", " "):lower()
+    -- Tokenize
+    local tokens = {}
+    for token in cleaned:gmatch("%S+") do
+        tokens[#tokens + 1] = token
+    end
+    -- Build ignore set
+    local ignore = {}
+    for _, kw in ipairs(config.keywords_ignore or {}) do
+        ignore[kw:lower()] = true
+    end
+    -- Filter out ignored keywords
+    local filtered = {}
+    for _, token in ipairs(tokens) do
+        if not ignore[token] then
+            filtered[#filtered + 1] = token
+        end
+    end
+    -- Build alias lookup (lowered key -> canonical category)
+    local alias_map = {}
+    for alias_key, cat in pairs(config.alias or {}) do
+        alias_map[alias_key:lower()] = cat
+    end
+    -- Check each remaining token against alias keys
+    for _, token in ipairs(filtered) do
+        local mapped = alias_map[token]
+        if mapped then
+            return mapped
+        end
+    end
+    -- No alias match: first remaining token is the category
+    if #filtered > 0 then
+        return filtered[1]
+    end
+    return base:lower()
+end
+
+--- Match a canonical category to a REAPER track.
+-- Case-insensitive name match first, GUID override on collision
+-- when calibration data is available.
+-- @param category string - canonical category name
+-- @param tracks array of { track = MediaTrack, name = string }
+-- @param guid_map table - { guid_string = MediaTrack, ... } from validate(), or nil
+-- @return (MediaTrack | nil, matched_name | nil)
+function R.Import.match(category, tracks, guid_map)
+    local cat_lower = category:lower()
+    local matches = {}
+    for _, t in ipairs(tracks) do
+        local tname = (t.name or ""):lower()
+        if tname == cat_lower then
+            matches[#matches + 1] = t
+        end
+    end
+    if #matches == 0 then
+        return nil, nil
+    end
+    if #matches == 1 then
+        return matches[1].track, matches[1].name
+    end
+    -- Collision: try GUID disambiguation
+    if guid_map then
+        for _, t in ipairs(matches) do
+            local ok, guid = pcall(reaper.GetTrackGUID, t.track)
+            if ok and guid and guid_map[guid] then
+                return t.track, t.name
+            end
+        end
+    end
+    -- No GUID or no match: first match wins, overflow handles surplus
+    return matches[1].track, matches[1].name
+end
+
+--- Insert a media file on a track at position 0.0.
+-- Internal helper used by main pipeline and overflow.
+-- @param path string - normalized file path
+-- @param track MediaTrack - destination track
+-- @return MediaItem or nil
+function R.Import._insert_media(path, track)
+    local item = reaper.AddMediaItemToTrack(track)
+    if not item then
+        reaper.ShowConsoleMsg("Grove: Failed to create media item for " .. path .. "\n")
+        return nil
+    end
+    reaper.GetSetMediaItemInfo(item, "D_POSITION", 0.0)
+    local take = reaper.AddTakeToMediaItem(item)
+    if not take then
+        reaper.ShowConsoleMsg("Grove: Failed to create take for " .. path .. "\n")
+        return item
+    end
+    local basename = path:match("([^/]+)%.[^%.]+$") or path
+    reaper.GetSetMediaItemTakeInfo(take, "P_NAME", basename)
+    local src = reaper.PCM_Source_CreateFromFile(path)
+    if src then
+        reaper.GetSetMediaItemTakeInfo(take, "P_SOURCE", src)
+        local len = reaper.GetMediaSourceLength(src)
+        if len then
+            reaper.GetSetMediaItemInfo(item, "D_LENGTH", len)
+        end
+    end
+    reaper.UpdateItemInProject(item)
+    return item
+end
+
+-- ════════════════════════════════════════════════════════════════════════
+-- OVERFLOW DISPATCH MODULE (Phase 4)
+-- ════════════════════════════════════════════════════════════════════════
+
+R.Overflow = {}
+
+-- Cached availability of the Fixed Lanes API
+R.Overflow._has_fixed_lanes = nil
+
+--- Check if SetTrackLaneComping (REAPER 6.0+) is available.
+-- Uses APIExists if available, falls back to pcall.
+-- @return boolean
+function R.Overflow._check_lanes_api()
+    if R.Overflow._has_fixed_lanes ~= nil then
+        return R.Overflow._has_fixed_lanes
+    end
+    if reaper.APIExists then
+        R.Overflow._has_fixed_lanes = reaper.APIExists("SetTrackLaneComping")
+    else
+        -- Fallback for older REAPER: try call with first track
+        local t = reaper.GetTrack(0, 0)
+        if t then
+            local ok = pcall(reaper.SetTrackLaneComping, t, 0)
+            R.Overflow._has_fixed_lanes = ok
+        else
+            R.Overflow._has_fixed_lanes = false
+        end
+    end
+    if not R.Overflow._has_fixed_lanes then
+        reaper.ShowConsoleMsg("Grove: Fixed Lanes API unavailable (REAPER < 6.0?). Falling back to new track creation.\n")
+    end
+    return R.Overflow._has_fixed_lanes
+end
+
+--- Dispatch a surplus stem to a lane or new track per config.
+-- @param stem table - { path = string, name = string }
+-- @param track MediaTrack - the matched category track
+-- @param config table - merged route_map config
+-- @param idx number - surplus index
+function R.Overflow.dispatch(stem, track, config, idx)
+    local category = R.Import.normalize(stem.name, config)
+    local behavior = R.Config.get_overflow(category)
+    -- Count existing media items on the track
+    local item_count = 0
+    while reaper.GetTrackMediaItem(track, item_count) do
+        item_count = item_count + 1
+    end
+    if behavior == "lanes" and R.Overflow._check_lanes_api() then
+        local max_lanes = config.max_lanes_per_track or 0
+        if max_lanes == 0 or item_count < max_lanes then
+            R.Overflow._to_lane(stem, track)
+        else
+            local stem_name = stem.name:gsub("%.[^%.]+$", "")
+            reaper.ShowConsoleMsg("Grove: Lane cap (" .. max_lanes .. ") reached. Creating new track for '" .. stem_name .. "'.\n")
+            R.Overflow._to_new_track(stem, track)
+        end
+    else
+        R.Overflow._to_new_track(stem, track)
+    end
+end
+
+--- Insert surplus stem as a new lane on the existing track.
+-- Enables fixed lane mode via SetTrackLaneComping (no-op if already set).
+-- @param stem table - { path = string, name = string }
+-- @param track MediaTrack
+function R.Overflow._to_lane(stem, track)
+    reaper.SetTrackLaneComping(track, 0)
+    R.Import._insert_media(stem.path, track)
+end
+
+--- Create a new track below the category track and insert surplus stem.
+-- Sets I_FOLDERDEPTH to 0 (normal track inside any parent folder).
+-- @param stem table - { path = string, name = string }
+-- @param category_track MediaTrack - the matched category track
+function R.Overflow._to_new_track(stem, category_track)
+    local track_idx = -1
+    for i = 0, reaper.CountTracks(0) - 1 do
+        if reaper.GetTrack(0, i) == category_track then
+            track_idx = i
+            break
+        end
+    end
+    reaper.InsertTrackAtIndex(track_idx + 1, true)
+    local new_track = reaper.GetTrack(0, track_idx + 1)
+    reaper.SetMediaTrackInfo_Value(new_track, "I_FOLDERDEPTH", 0)
+    local ret, orig_name = reaper.GetTrackName(category_track, "")
+    local stem_name = stem.name:gsub("%.[^%.]+$", "")
+    reaper.GetSetMediaTrackInfo_String(new_track, "P_NAME", orig_name .. " - " .. stem_name, true)
+    R.Import._insert_media(stem.path, new_track)
+end
 
 -- ════════════════════════════════════════════════════════════════════════
 -- ENTRY POINT
 -- ════════════════════════════════════════════════════════════════════════
 
--- Load configuration at startup for instant feedback.
--- Full pipeline (scan, match, insert, overflow) will be wired in later phases.
-local config = R.Config.load()
-if config then
-    local alias_count = 0
-    for _ in pairs(config.alias) do
-        alias_count = alias_count + 1
+-- Detect calibration mode from command args
+local _is_calibrate = false
+local _cmd_args = reaper.GetCommandArgs()
+if _cmd_args then
+    for _, _arg in ipairs(_cmd_args) do
+        if _arg == "--calibrate" then
+            _is_calibrate = true
+            break
+        end
     end
-    local cat_count = 0
-    for _ in pairs(config.categories) do
-        cat_count = cat_count + 1
-    end
-    local verdict = R.Config.get_overflow("sub_bass")
-    reaper.ShowConsoleMsg("Grove Stem Auto-Router loaded.\n")
-    reaper.ShowConsoleMsg(
-        string.format(
-            "  Config: overflow=%s, max_lanes=%d, aliases=%d, categories=%d, ignore_keywords=%d\n"
-                .. "  sub_bass overflow: %s (per-category override)\n",
-            config.overflow_behavior,
-            config.max_lanes_per_track,
-            alias_count,
-            cat_count,
-            #(config.keywords_ignore or {}),
-            verdict or "nil"
-        )
-    )
 end
+
+if _is_calibrate then
+    -- Calibration mode: user selects tracks, GUIDs persisted
+    reaper.ShowConsoleMsg("Grove: Calibration mode — select tracks to calibrate, then click OK.\n")
+    reaper.ShowMessageBox("Select the tracks to calibrate, then click OK.", "Grove Calibration", 0)
+    local _selected = {}
+    for _i = 0, reaper.CountSelectedTracks(0) - 1 do
+        _selected[#_selected + 1] = reaper.GetSelectedTrack(0, _i)
+    end
+    if #_selected == 0 then
+        reaper.ShowConsoleMsg("Grove: No tracks selected. Calibration cancelled.\n")
+        return
+    end
+    R.Calibration.save(_selected)
+    return
+end
+
+-- Normal pipeline: load config, scan stems, match, insert, overflow
+local config = R.Config.load()
+if not config then
+    reaper.ShowConsoleMsg("Grove: Config loading failed. Aborting.\n")
+    return
+end
+
+-- Load and validate calibration data (optional, graceful fallback)
+local guid_map = nil
+local raw_guids = R.Calibration.load()
+if raw_guids then
+    local valid, stale = R.Calibration.validate(raw_guids)
+    if next(valid) then
+        guid_map = valid
+    end
+end
+
+-- Collect REAPER tracks: { track, name } pairs
+local reaper_tracks = {}
+for i = 0, reaper.CountTracks(0) - 1 do
+    local tr = reaper.GetTrack(0, i)
+    local ret, tr_name = reaper.GetTrackName(tr, "")
+    reaper_tracks[#reaper_tracks + 1] = { track = tr, name = tr_name }
+end
+
+-- Scan stem directory (same directory as the script)
+local stems = R.Import.scan(_script_dir)
+
+if #stems == 0 then
+    reaper.ShowConsoleMsg("Grove: No audio files found in '" .. _script_dir .. "'\n")
+    return
+end
+
+-- Main pipeline: insert stems, handle overflow
+reaper.PreventUIRefresh(1)
+reaper.Undo_BeginBlock()
+
+local used_tracks = {}
+local insert_count = 0
+local overflow_count = 0
+local skip_count = 0
+
+for _, stem in ipairs(stems) do
+    local category = R.Import.normalize(stem.name, config)
+    local matched, matched_name = R.Import.match(category, reaper_tracks, guid_map)
+    if matched then
+        local track_key = tostring(matched)
+        if not used_tracks[track_key] then
+            -- First stem for this track: direct insert
+            R.Import._insert_media(stem.path, matched)
+            used_tracks[track_key] = true
+            insert_count = insert_count + 1
+        else
+            -- Surplus stem: overflow dispatch
+            R.Overflow.dispatch(stem, matched, config, overflow_count)
+            overflow_count = overflow_count + 1
+        end
+    else
+        reaper.ShowConsoleMsg("Grove: No track match for '" .. stem.name .. "' (category: " .. category .. ")\n")
+        skip_count = skip_count + 1
+    end
+end
+
+reaper.Undo_EndBlock("Grove Stem Auto-Router", -1)
+reaper.PreventUIRefresh(-1)
+
+reaper.ShowConsoleMsg(string.format(
+    "Grove: %d stem(s) found. %d inserted, %d overflowed, %d skipped. Run complete.\n",
+    #stems, insert_count, overflow_count, skip_count
+))
 
 -- Export R globally for REAPER console debugging
 _G.R = R

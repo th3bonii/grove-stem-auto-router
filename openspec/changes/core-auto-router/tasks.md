@@ -32,22 +32,22 @@ Chain strategy: feature-branch-chain
 
 ## Phase 2: Calibration System
 
-- [ ] 2.1 Write `R.Calibration.load()` — read GUIDs via `SetProjExtState("GROVE_STEMS", "TargetGUIDs")`
-- [ ] 2.2 Write `R.Calibration.validate(guid_map)` — verify GUIDs with `BR_GetMediaTrackByGUID`, return stale list
-- [ ] 2.3 Write `R.Calibration.save(tracks)` — serialize GUIDs to ExtState as JSON array
-- [ ] 2.4 Handle `--calibrate` flag: prompt track selection, call save, exit cleanly
+- [x] 2.1 Write `R.Calibration.load()` — read GUIDs via `SetProjExtState("GROVE_STEMS", "TargetGUIDs")`
+- [x] 2.2 Write `R.Calibration.validate(guid_map)` — verify GUIDs with `BR_GetMediaTrackByGUID`, return stale list
+- [x] 2.3 Write `R.Calibration.save(tracks)` — serialize GUIDs to ExtState as JSON array
+- [x] 2.4 Handle `--calibrate` flag: prompt track selection, call save, exit cleanly
 
 ## Phase 3: Matching Engine
 
-- [ ] 3.1 Write `R.Import.scan(dir)` — collect `.wav`/`.flac`/`.mp3`, normalize paths to forward slashes
-- [ ] 3.2 Write `R.Import.normalize(name, config)` — strip `keywords_ignore`, apply alias substitution, extract category
-- [ ] 3.3 Write `R.Import.match(category, tracks, guid_map)` — name match first, GUID override on collision
-- [ ] 3.4 Write media insertion — `InsertMedia` at position 0.0 on matched track, path normalized
+- [x] 3.1 Write `R.Import.scan(dir)` — collect `.wav`/`.flac`/`.mp3`, normalize paths to forward slashes
+- [x] 3.2 Write `R.Import.normalize(name, config)` — strip `keywords_ignore`, apply alias substitution, extract category
+- [x] 3.3 Write `R.Import.match(category, tracks, guid_map)` — name match first, GUID override on collision
+- [x] 3.4 Write media insertion — `InsertMedia` at position 0.0 on matched track, path normalized
 
 ## Phase 4: Overflow & Main Pipeline
 
-- [ ] 4.1 Write runtime API detection — check `SetTrackLaneComping` availability, set fallback flag
-- [ ] 4.2 Write `R.Overflow.dispatch(stem, track, config, idx)` — lane or new_track per config
-- [ ] 4.3 Write lane logic — `SetTrackLaneComping`, cap at `max_lanes_per_track`, fallback to new_track
-- [ ] 4.4 Write new_track logic — `InsertTrack` below last category track, copy `I_FOLDERDEPTH`
-- [ ] 4.5 Write main entry — parse args, run pipeline, wrap in `Undo_BeginBlock`/`EndBlock`/`PreventUIRefresh`
+- [x] 4.1 Write runtime API detection — check `SetTrackLaneComping` availability, set fallback flag
+- [x] 4.2 Write `R.Overflow.dispatch(stem, track, config, idx)` — lane or new_track per config
+- [x] 4.3 Write lane logic — `SetTrackLaneComping`, cap at `max_lanes_per_track`, fallback to new_track
+- [x] 4.4 Write new_track logic — `InsertTrack` below last category track, copy `I_FOLDERDEPTH`
+- [x] 4.5 Write main entry — parse args, run pipeline, wrap in `Undo_BeginBlock`/`EndBlock`/`PreventUIRefresh`
