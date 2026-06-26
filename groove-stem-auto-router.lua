@@ -941,12 +941,30 @@ for i = 0, reaper.CountTracks(0) - 1 do
     reaper_tracks[#reaper_tracks + 1] = { track = tr, name = tr_name }
 end
 
--- Scan stem directory (same directory as the script)
+-- Scan for audio files: try script dir first, or prompt user to select a stem
 local stems = R.Import.scan(_script_dir)
 
 if #stems == 0 then
-    reaper.ShowConsoleMsg("Grove: No audio files found in '" .. _script_dir .. "'\n")
-    return
+    reaper.ShowConsoleMsg("Grove: No stems found in script directory. Please select one stem file from your export folder.\n")
+    local retval, stem_path = reaper.GetUserFileNameForRead(
+        "",
+        "Select ONE stem from your export folder",
+        "*.wav;*.flac;*.mp3"
+    )
+    if not retval then
+        reaper.ShowConsoleMsg("Grove: Cancelled by user.\n")
+        return
+    end
+    local stem_dir = stem_path:gsub("\\", "/"):match("^(.*/)")
+    if not stem_dir then
+        reaper.ShowConsoleMsg("Grove: Could not determine stem directory.\n")
+        return
+    end
+    stems = R.Import.scan(stem_dir)
+    if #stems == 0 then
+        reaper.ShowConsoleMsg("Grove: No audio files found in '" .. stem_dir .. "'\n")
+        return
+    end
 end
 
 -- Main pipeline: insert stems, handle overflow
