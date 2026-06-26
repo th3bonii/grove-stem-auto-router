@@ -43,6 +43,9 @@ local R = {}
 -- @param str (string) JSON input
 -- @return (value, nil) on success, (nil, error_msg) on failure
 function R.parse_json(str)
+    if type(str) ~= "string" then
+        return nil, "expected string, got " .. type(str)
+    end
     local pos = 1
 
     -- Skip whitespace: space, tab, LF, CR
@@ -561,8 +564,23 @@ R.Calibration = {}
 -- Reads SetProjExtState("GROVE_STEMS", "TargetGUIDs") and parses as JSON array.
 -- @return table { guid_string = true, ... } or nil if none stored
 function R.Calibration.load()
-    local ok, json_str = pcall(reaper.GetProjExtState, 0, "GROVE_STEMS", "TargetGUIDs")
-    if not ok or not json_str or json_str == "" then
+    -- GetProjExtState returns (boolean retval, string value) in some REAPER
+    -- versions and just (string) in others. Wrap in a helper to capture all returns.
+    local function _get_ext_state()
+        return reaper.GetProjExtState(0, "GROVE_STEMS", "TargetGUIDs")
+    end
+    local ok, ret1, ret2 = pcall(_get_ext_state)
+    if not ok then
+        return nil
+    end
+    -- ret1 is either the boolean retval (two-return API) or the value string (one-return)
+    local json_str
+    if type(ret1) == "boolean" then
+        json_str = ret2  -- two-return API: ret2 is the actual value
+    else
+        json_str = ret1  -- one-return API: ret1 is the value
+    end
+    if type(json_str) ~= "string" or json_str == "" then
         return nil
     end
     local guids, err = R.parse_json(json_str)
