@@ -1,0 +1,72 @@
+{
+    "alias": {
+        "kick": "sub_bass",
+        "sub": "sub_bass",
+        "bass": "sub_bass",
+        "808": "sub_bass",
+        "snare": "drums",
+        "hat": "drums",
+        "hihat": "drums",
+        "clap": "drums",
+        "rim": "drums",
+        "tom": "drums",
+        "vox": "vocals",
+        "vocal": "vocals",
+        "voice": "vocals",
+        "lead": "melody",
+        "synth": "melody",
+        "keys": "melody",
+        "piano": "melody",
+        "gtr": "guitar",
+        "guitar": "guitar",
+        "acoustic": "guitar",
+        "e-gtr": "guitar",
+        "fx": "fx",
+        "sfx": "fx",
+        "ambient": "fx",
+        "strings": "orchestra",
+        "brass": "orchestra",
+        "horn": "orchestra",
+        "flute": "orchestra",
+        "organ": "keys",
+        "pad": "pad",
+        "atmo": "pad"
+    },
+    "keywords_ignore": [
+        "v1",
+        "v2",
+        "v3",
+        "v4",
+        "mix",
+        "master",
+        "loop",
+        "raw",
+        "processed",
+        "stereo",
+        "mono",
+        "wet",
+        "dry",
+        "final",
+        "render",
+        "bounce",
+        "export",
+        "session",
+        "take",
+        "track",
+        "audio",
+        "stem"
+    ],
+    "overflow_behavior": "lanes",
+    "max_lanes_per_track": 4,
+    "categories": {
+        "sub_bass": {
+            "overflow_behavior": "new_track"
+        },
+        "fx": {
+            "overflow_behavior": "lanes"
+        },
+        "pad": {
+            "overflow_behavior": "lanes"
+        }
+    }
+}

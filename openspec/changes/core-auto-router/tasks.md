@@ -9,7 +9,7 @@
 | Chained PRs recommended | Yes |
 | Suggested split | PR 1: JSON parser + config. PR 2: calibration + matching + overflow + main pipeline |
 | Delivery strategy | auto-forecast |
-| Chain strategy | pending |
+| Chain strategy | feature-branch-chain |
 
 Decision needed before apply: No
 Chained PRs recommended: Yes
@@ -25,10 +25,10 @@ Chain strategy: feature-branch-chain
 
 ## Phase 1: JSON Parser & Config
 
-- [ ] 1.1 Create `route_map.json` with `alias`, `keywords_ignore`, `overflow_behavior`, `max_lanes_per_track`, `categories`
-- [ ] 1.2 Write `R.parse_json(str)` — recursive-descent parser: objects, arrays, strings, numbers, booleans, null
-- [ ] 1.3 Write `R.Config.load(path)` — parse `route_map.json`, validate schema, merge defaults on missing
-- [ ] 1.4 Write `R.Config.get_overflow(category)` — per-category override or global fallback
+- [x] 1.1 Create `route_map.json` with `alias`, `keywords_ignore`, `overflow_behavior`, `max_lanes_per_track`, `categories`
+- [x] 1.2 Write `R.parse_json(str)` — recursive-descent parser: objects, arrays, strings, numbers, booleans, null
+- [x] 1.3 Write `R.Config.load(path)` — parse `route_map.json`, validate schema, merge defaults on missing
+- [x] 1.4 Write `R.Config.get_overflow(category)` — per-category override or global fallback
 
 ## Phase 2: Calibration System
 
