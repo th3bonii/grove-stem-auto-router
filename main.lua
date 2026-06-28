@@ -25,7 +25,13 @@
 --]]
 
 -- ══════════════════════════════════════════════════════════════════════
--- 0. Discover script directory (needed by all modules)
+-- 0. Error wrapper — anything that fails shows in REAPER console
+-- ══════════════════════════════════════════════════════════════════════
+
+local ok_init, init_err = pcall(function()
+
+-- ══════════════════════════════════════════════════════════════════════
+-- 1. Discover script directory (needed by all modules)
 -- ══════════════════════════════════════════════════════════════════════
 
 local src = debug.getinfo(1, "S").source or ""
@@ -34,7 +40,7 @@ src = src:gsub("\\", "/")
 local script_dir = src:match("^(.*/)") or ""
 
 -- ══════════════════════════════════════════════════════════════════════
--- 1. Shared namespace table
+-- 2. Shared namespace table
 -- ══════════════════════════════════════════════════════════════════════
 
 local R = {
@@ -42,7 +48,7 @@ local R = {
 }
 
 -- ══════════════════════════════════════════════════════════════════════
--- 2. Load modules in dependency order
+-- 3. Load modules in dependency order
 -- ══════════════════════════════════════════════════════════════════════
 
 -- json has no deps
@@ -61,8 +67,19 @@ dofile(script_dir .. "lib/import.lua")(R)
 dofile(script_dir .. "lib/overflow.lua")(R)
 
 -- ══════════════════════════════════════════════════════════════════════
--- 3. Launch GUI
+-- 4. Launch GUI
 -- ══════════════════════════════════════════════════════════════════════
 
 local gui = dofile(script_dir .. "gui/main_window.lua")
 gui.launch(R)
+
+end) -- pcall
+
+if not ok_init then
+    reaper.ShowConsoleMsg("GROVE STEM AUTO-ROUTER ERROR:\n" .. tostring(init_err) .. "\n")
+    reaper.ShowMessageBox(
+        "Grove Stem Auto-Router failed to initialize.\n\nError:\n" .. tostring(init_err)
+            .. "\n\nCheck View → Console for details.",
+        "Grove Error", 0
+    )
+end
