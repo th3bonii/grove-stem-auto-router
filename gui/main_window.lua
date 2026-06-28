@@ -250,11 +250,12 @@ return {
                 -- ════════════════════════════════════════════════════════
                 ImGui.ImGui_Separator(ctx); ImGui.ImGui_Text(ctx, "LOG")
                 if ImGui.ImGui_BeginChild(ctx, "##log", {0, 120}, true) then
-                for _, line in ipairs(state.log_lines) do
-                    ImGui.ImGui_TextWrapped(ctx, line)
+                    for _, line in ipairs(state.log_lines) do
+                        ImGui.ImGui_TextWrapped(ctx, line)
+                    end
+                    -- auto-scroll to bottom
+                    ImGui.ImGui_SetScrollHereY(ctx, 1)
                 end
-                -- auto-scroll to bottom
-                ImGui.ImGui_SetScrollHereY(ctx, 1)
                 ImGui.ImGui_EndChild(ctx)
 
                 ImGui.ImGui_End(ctx)
