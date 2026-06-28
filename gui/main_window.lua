@@ -218,9 +218,10 @@ return {
                 if state.scanned then
                     ImGui.ImGui_Separator(ctx)
                     ImGui.ImGui_Text(ctx, "STEMS (" .. state.stem_count .. ")")
-                    ImGui.ImGui_BeginChild(ctx, "##stems", 0, 140, true)
-                    for _, nm in ipairs(state.stem_names) do
-                        ImGui.ImGui_BulletText(ctx, nm)
+                    if ImGui.ImGui_BeginChild(ctx, "##stems", {0, 140}, true) then
+                        for _, nm in ipairs(state.stem_names) do
+                            ImGui.ImGui_BulletText(ctx, nm)
+                        end
                     end
                     ImGui.ImGui_EndChild(ctx)
                 end
@@ -248,7 +249,7 @@ return {
                 --  LOG
                 -- ════════════════════════════════════════════════════════
                 ImGui.ImGui_Separator(ctx); ImGui.ImGui_Text(ctx, "LOG")
-                ImGui.ImGui_BeginChild(ctx, "##log", 0, 120, true)
+                if ImGui.ImGui_BeginChild(ctx, "##log", {0, 120}, true) then
                 for _, line in ipairs(state.log_lines) do
                     ImGui.ImGui_TextWrapped(ctx, line)
                 end
