@@ -691,13 +691,11 @@ ImGui.ImGui_Spacing(ctx)
                     local ch_m, new_model = ImGui.ImGui_InputText(ctx, "##model", cur_model)
                     if ch_m then state.ai_model = new_model; save_prefs() end
 
-                    -- API Key (masked)
-                    local masked = string.rep("*", #state.ai_api_key)
-                    local display_key = state.ai_api_key ~= "" and masked or ""
+                    -- API Key (masked by ImGui InputTextFlags_Password, value stays real)
                     ImGui.ImGui_Text(ctx, "API Key:")
                     ImGui.ImGui_SameLine(ctx, 0, 4)
                     ImGui.ImGui_SetNextItemWidth(ctx, -1)
-                    local ch_k, new_key = ImGui.ImGui_InputText(ctx, "##api_key", display_key,
+                    local ch_k, new_key = ImGui.ImGui_InputText(ctx, "##api_key", state.ai_api_key,
                         ImGui.ImGui_InputTextFlags_Password())
                     if ch_k then
                         state.ai_api_key = new_key
@@ -1043,7 +1041,7 @@ ImGui.ImGui_Spacing(ctx)
         local cfg = R.Config.load()
         if cfg then
             state.overflow_mode = cfg.overflow_behavior or "lanes"
-            state.max_lanes = 0
+            state.max_lanes = cfg.max_lanes_per_track or state.max_lanes or 0
         end
         local cc = R.Calibration.get_count()
         if cc > 0 then state.calibrated = true; state.cal_count = cc end

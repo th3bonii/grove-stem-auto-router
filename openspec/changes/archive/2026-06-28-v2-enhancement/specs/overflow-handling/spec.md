@@ -1,10 +1,6 @@
-# Overflow Handling Specification
+# Delta for Overflow Handling
 
-## Purpose
-
-Define behavior when more stems match a category than available REAPER tracks: insert surplus into Fixed Lanes or create new tracks below the category group, configurable per `overflow_behavior`.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Lanes Mode
 
@@ -25,23 +21,6 @@ When `overflow_behavior = "new_track"`, the system MUST detect the parent folder
 - WHEN new track overflow runs for 3 surplus stems
 - THEN 3 new tracks created inside folder A, after the matched track
 - AND folder structure remains valid
-
-### Requirement: Max Lanes Cap
-
-When lanes mode is active, the system MUST NOT exceed `max_lanes_per_track`. Stems beyond the cap fall back to new track creation.
-
-| Scenario | GIVEN | WHEN | THEN |
-|----------|-------|------|------|
-| Hit lane cap | `max_lanes_per_track = 3` and 6 stems match one track | lanes mode processes | 3 stems in lanes, 3 as new tracks below |
-| No cap set | `max_lanes_per_track = 0` | overflow runs | infinite lanes allowed (capped only by REAPER) |
-
-### Requirement: Per-Category Override
-
-If `route_map.json` defines per-category `overflow_behavior` in the `categories` object, those values MUST override the global setting for that category.
-
-- GIVEN global `overflow_behavior = "lanes"` but `categories.sub_bass.overflow_behavior = "new_track"`
-- WHEN sub_bass stems overflow
-- THEN new tracks are created (not lanes)
 
 ### Requirement: Folder Depth Integrity
 
