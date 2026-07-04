@@ -12,8 +12,14 @@ return function(R, JSON)
             alias = {},
             keywords_ignore = {},
             overflow_behavior = "lanes",
-            max_lanes_per_track = 6,
-            categories = {}
+            max_lanes_per_track = 0,  -- 0 = unlimited
+            categories = {},
+            -- v2 schema fields
+            fuzzy_threshold = 0.7,
+            alias_priority = "best-match",
+            lanes_mode = "auto",
+            color_stems_by_track = true,
+            ai_config = { provider = "", model = "gpt-4o-mini", timeout_seconds = 30 }
         }
     end
 
@@ -42,6 +48,32 @@ return function(R, JSON)
                 end
             end
         end
+        -- v2 schema validation (optional — defaults applied if missing)
+        if config.fuzzy_threshold ~= nil then
+            if type(config.fuzzy_threshold) ~= "number" or config.fuzzy_threshold < 0 or config.fuzzy_threshold > 1 then
+                return false, "'fuzzy_threshold' must be a number between 0 and 1"
+            end
+        end
+        if config.alias_priority ~= nil then
+            if config.alias_priority ~= "first-match" and config.alias_priority ~= "best-match" then
+                return false, "'alias_priority' must be \"first-match\" or \"best-match\""
+            end
+        end
+        if config.lanes_mode ~= nil then
+            if config.lanes_mode ~= "auto" and config.lanes_mode ~= "free" and config.lanes_mode ~= "fixed" then
+                return false, "'lanes_mode' must be \"auto\", \"free\", or \"fixed\""
+            end
+        end
+        if config.color_stems_by_track ~= nil then
+            if type(config.color_stems_by_track) ~= "boolean" then
+                return false, "'color_stems_by_track' must be a boolean"
+            end
+        end
+        if config.ai_config ~= nil then
+            if type(config.ai_config) ~= "table" then
+                return false, "'ai_config' must be an object"
+            end
+        end
         return true, nil
     end
 
@@ -55,7 +87,8 @@ return function(R, JSON)
         return merged
     end
 
-    function R.Config.load(path)
+    function R.Config.load(path, force_reload)
+        if R.Config._data and not force_reload then return R.Config._data end
         path = path or (R._script_dir .. "route_map.json")
         local file, open_err = io.open(path, "r")
         if not file then
@@ -113,5 +146,37 @@ return function(R, JSON)
             set[kw:lower()] = true
         end
         return set
+    end
+
+    -- v2 getters
+
+    function R.Config.get_fuzzy_threshold()
+        local config = R.Config._data
+        if not config then return 0.7 end
+        return config.fuzzy_threshold
+    end
+
+    function R.Config.get_alias_priority()
+        local config = R.Config._data
+        if not config then return "best-match" end
+        return config.alias_priority
+    end
+
+    function R.Config.get_lanes_mode()
+        local config = R.Config._data
+        if not config then return "auto" end
+        return config.lanes_mode
+    end
+
+    function R.Config.get_color_stems_by_track()
+        local config = R.Config._data
+        if not config then return true end
+        return config.color_stems_by_track
+    end
+
+    function R.Config.get_ai_config()
+        local config = R.Config._data
+        if not config then return { provider = "", model = "gpt-4o-mini", timeout_seconds = 30 } end
+        return config.ai_config
     end
 end

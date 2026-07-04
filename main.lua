@@ -17,6 +17,8 @@
       REAPER 6.0+
       ReaImGui (via ReaPack)
       SWS Extension (optional, for BR_GetMediaTrackByGUID)
+      curl (built-in on macOS/Linux/Windows 10+) — for AI orphan resolution
+      ai-proxy/ with Python 3 (optional) — legacy alternative to curl
     
     Usage:
       Place the entire folder in REAPER's Scripts directory.
@@ -40,7 +42,13 @@ src = src:gsub("\\", "/")
 local script_dir = src:match("^(.*/)") or ""
 
 -- ══════════════════════════════════════════════════════════════════════
--- 2. Shared namespace table
+-- 2. Clean stale AI mapping from previous session
+-- ══════════════════════════════════════════════════════════════════════
+
+pcall(os.remove, script_dir .. "mapping.json")
+
+-- ══════════════════════════════════════════════════════════════════════
+-- 3. Shared namespace table
 -- ══════════════════════════════════════════════════════════════════════
 
 local R = {
@@ -53,6 +61,7 @@ local R = {
 
 -- json has no deps
 local JSON = dofile(script_dir .. "lib/json.lua")
+R.JSON = JSON
 
 -- config depends on json
 dofile(script_dir .. "lib/config.lua")(R, JSON)
@@ -65,6 +74,18 @@ dofile(script_dir .. "lib/import.lua")(R)
 
 -- overflow depends on R.Config + R.Import
 dofile(script_dir .. "lib/overflow.lua")(R)
+
+-- matching-engine stub (will be filled in Phase 2)
+local ok_me, me_err = pcall(function() dofile(script_dir .. "lib/matching-engine.lua")(R) end)
+if not ok_me then reaper.ShowConsoleMsg("Grove: matching-engine.lua not loaded (stub): " .. tostring(me_err) .. "\n") end
+
+-- fuzzy stub (will be filled in Phase 2)
+local ok_fz, fz_err = pcall(function() dofile(script_dir .. "lib/fuzzy.lua")(R) end)
+if not ok_fz then reaper.ShowConsoleMsg("Grove: fuzzy.lua not loaded (stub): " .. tostring(fz_err) .. "\n") end
+
+-- orphan stub (will be filled in Phase 3)
+local ok_or, or_err = pcall(function() dofile(script_dir .. "lib/orphan.lua")(R) end)
+if not ok_or then reaper.ShowConsoleMsg("Grove: orphan.lua not loaded (stub): " .. tostring(or_err) .. "\n") end
 
 -- ══════════════════════════════════════════════════════════════════════
 -- 4. Launch GUI
