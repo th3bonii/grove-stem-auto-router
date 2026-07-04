@@ -7,54 +7,166 @@ return function(R)
 
     R.Overflow._has_fixed_lanes = nil
 
+    --- Detect the best available lanes API.
+    -- Priority: REAPER 7+ SetMediaTrackLanes → SetTrackLaneComping → free mode
+    -- Caches result so API is only detected once per session.
+    -- @return string — "lanes7", "lanecomping", or "freemode"
     function R.Overflow._check_lanes_api()
         if R.Overflow._has_fixed_lanes ~= nil then return R.Overflow._has_fixed_lanes end
-        if reaper.APIExists then
-            R.Overflow._has_fixed_lanes = reaper.APIExists("SetTrackLaneComping")
-        else
-            local t = reaper.GetTrack(0, 0)
-            if t then
-                R.Overflow._has_fixed_lanes = pcall(reaper.SetTrackLaneComping, t, 0)
-            else
-                R.Overflow._has_fixed_lanes = false
-            end
+
+        -- Check for REAPER 7+ native Fixed Lanes API
+        if reaper.APIExists and reaper.APIExists("SetMediaTrackLanes") then
+            R.Overflow._has_fixed_lanes = "lanes7"
+            reaper.ShowConsoleMsg("Grove: Using REAPER 7+ Fixed Lanes API\n")
+            return R.Overflow._has_fixed_lanes
         end
+
+        -- Check for REAPER 6+ SetTrackLaneComping
+        if reaper.APIExists and reaper.APIExists("SetTrackLaneComping") then
+            R.Overflow._has_fixed_lanes = "lanecomping"
+            reaper.ShowConsoleMsg("Grove: Using SetTrackLaneComping (REAPER 6+)\n")
+            return R.Overflow._has_fixed_lanes
+        end
+
+        -- Check by direct function reference (older REAPER builds)
+        if reaper.SetTrackLaneComping ~= nil then
+            R.Overflow._has_fixed_lanes = "lanecomping"
+            reaper.ShowConsoleMsg("Grove: Using SetTrackLaneComping (direct ref)\n")
+            return R.Overflow._has_fixed_lanes
+        end
+
+        -- Fallback to free item positioning
+        R.Overflow._has_fixed_lanes = "freemode"
+        reaper.ShowConsoleMsg("Grove: Using free item positioning (no lanes API)\n")
         return R.Overflow._has_fixed_lanes
     end
 
-    function R.Overflow.dispatch(stem, track, config, idx)
-        local category = R.Import.normalize(stem.name, config)
-        local behavior = R.Config.get_overflow(category)
+    --- Dispatch an overflow stem to a lane or new track.
+    -- Uses config.overflow_behavior directly (the GUI-selected mode) instead of
+    -- R.Config.get_overflow(), so category-level settings don't override the
+    -- user's explicit Lines / New Track choice at import time.
+    -- @param stem table — stem record { path, name }
+    -- @param track reaper.MediaTrack — the matched track receiving overflow
+    -- @param config table — route_map config (with overflow_behavior set by GUI)
+    -- @param idx int — overflow index (for logging)
+    -- @param category string|nil — category from match context; nil falls back to re-parse
+    function R.Overflow.dispatch(stem, track, config, idx, category)
+        local behavior = config.overflow_behavior or "lanes"
         local item_count = 0
         while reaper.GetTrackMediaItem(track, item_count) do item_count = item_count + 1 end
-        if behavior == "lanes" and R.Overflow._check_lanes_api() then
-            local max_lanes = config.max_lanes_per_track or 0
-            if max_lanes == 0 or item_count < max_lanes then
-                R.Overflow._to_lane(stem, track)
-            else
-                R.Overflow._to_new_track(stem, track)
-            end
-        else
-            R.Overflow._to_new_track(stem, track)
-        end
+
+if behavior == "lanes" then
+  local max_lanes = (config and config.max_lanes_per_track) or 0
+  if max_lanes > 0 and item_count >= max_lanes then
+    R.Overflow._to_new_track(stem, track)
+  else
+    R.Overflow._to_lane(stem, track)
+  end
+else
+  R.Overflow._to_new_track(stem, track)
+end
     end
 
+    --- Place a stem as a new lane on an existing track.
+    -- Uses the best available lanes API for the current REAPER version.
+    -- @param stem table — stem record
+    -- @param track reaper.MediaTrack — target track
     function R.Overflow._to_lane(stem, track)
-        reaper.SetTrackLaneComping(track, 0)
-        R.Import.insert_media(stem.path, track)
+        local api = R.Overflow._check_lanes_api()
+
+        if api == "lanes7" then
+            -- REAPER 7+ native Fixed Lanes: enable then place item
+            pcall(reaper.SetMediaTrackLanes, track, true)
+        elseif api == "lanecomping" then
+            -- REAPER 6+ lane comping: free mode + comping
+            reaper.SetMediaTrackInfo_Value(track, "I_FREEMODE", 1)
+            pcall(reaper.SetTrackLaneComping, track, 0)
+        else
+            -- Free item positioning (fallback)
+            reaper.SetMediaTrackInfo_Value(track, "I_FREEMODE", 1)
+        end
+
+        -- Overflow item starts at the same position as the first (main) item on the track
+        local pos = 0
+        local first = reaper.GetTrackMediaItem(track, 0)
+        if first then
+            local ok, p = pcall(reaper.GetMediaItemInfo_Value, first, "D_POSITION")
+            if ok and p then pos = p end
+        end
+
+        R.Import.insert_media(stem.path, track, pos)
     end
 
-    function R.Overflow._to_new_track(stem, category_track)
+    --- Walk the I_FOLDERDEPTH chain upward from a tracked track to find
+    -- the folder it belongs to, then return the index after the last
+    -- track inside that folder (where new overflow tracks should be inserted).
+    -- @param category_track reaper.MediaTrack — the matched track
+    -- @return int — insert index, or -1 if not inside any folder
+    function R.Overflow._get_parent_folder_last_idx(category_track)
         local track_idx = -1
         for i = 0, reaper.CountTracks(0) - 1 do
-            if reaper.GetTrack(0, i) == category_track then track_idx = i; break end
+            if reaper.GetTrack(0, i) == category_track then
+                track_idx = i
+                break
+            end
         end
-        reaper.InsertTrackAtIndex(track_idx + 1, true)
-        local new_track = reaper.GetTrack(0, track_idx + 1)
+        if track_idx < 0 then return track_idx end
+
+        -- Walk backwards to find the folder start (I_FOLDERDEPTH = 1)
+        local folder_start = -1
+        local depth = 0
+        for i = track_idx, 0, -1 do
+            local t = reaper.GetTrack(0, i)
+            local fd = reaper.GetMediaTrackInfo_Value(t, "I_FOLDERDEPTH")
+            depth = depth + fd
+            if depth >= 1 then
+                folder_start = i
+                break
+            end
+        end
+        if folder_start < 0 then return -1 end  -- not in a folder
+
+        -- Walk forward from folder_start to find the last track at depth > 0
+        -- (the last track inside the folder, before the -1 sentinel)
+        local last_inside = folder_start
+        local running_depth = 1
+        for i = folder_start + 1, reaper.CountTracks(0) - 1 do
+            local t = reaper.GetTrack(0, i)
+            local fd = reaper.GetMediaTrackInfo_Value(t, "I_FOLDERDEPTH")
+            running_depth = running_depth + fd
+            if running_depth <= 0 then break end  -- exited the folder
+            last_inside = i
+        end
+
+        -- Return the index AFTER the last track inside the folder
+        return last_inside + 1
+    end
+
+    --- Create a new track for overflow, placed inside the parent folder
+    -- (if the matched track is in a folder) or directly after the matched track.
+    -- @param stem table — stem record
+    -- @param category_track reaper.MediaTrack — the matched track
+    function R.Overflow._to_new_track(stem, category_track)
+        local insert_idx = R.Overflow._get_parent_folder_last_idx(category_track)
+        if insert_idx < 0 then
+            -- No parent folder found: insert directly after the matched track
+            for i = 0, reaper.CountTracks(0) - 1 do
+                if reaper.GetTrack(0, i) == category_track then
+                    insert_idx = i + 1
+                    break
+                end
+            end
+            if insert_idx <= 0 then insert_idx = reaper.CountTracks(0) end
+        end
+
+        reaper.InsertTrackAtIndex(insert_idx, true)
+        local new_track = reaper.GetTrack(0, insert_idx)
         reaper.SetMediaTrackInfo_Value(new_track, "I_FOLDERDEPTH", 0)
+
         local _, orig_name = reaper.GetTrackName(category_track, "")
         local stem_name = stem.name:gsub("%.[^%.]+$", "")
         reaper.GetSetMediaTrackInfo_String(new_track, "P_NAME", orig_name .. " - " .. stem_name, true)
+
         R.Import.insert_media(stem.path, new_track)
     end
 end

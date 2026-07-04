@@ -50,22 +50,33 @@ return function(R, JSON)
         return valid, stale
     end
 
-    function R.Calibration.save(tracks)
-        local parts = {}
-        for _, track in ipairs(tracks) do
-            local ok, guid = pcall(reaper.GetTrackGUID, track)
-            if ok and guid then
-                parts[#parts + 1] = '"' .. guid .. '"'
-            end
-        end
-        if #parts == 0 then
+function R.Calibration.save(tracks)
+  local guid_list = {}
+  local guid_set = {}
+  for _, track in ipairs(tracks) do
+    if not track then
+      reaper.ShowConsoleMsg("Grove: Skipping nil track in calibration save.\n")
+    else
+      local ok, guid = pcall(reaper.GetTrackGUID, track)
+      if not ok then ok = false end
+      if not ok or not guid then
+        reaper.ShowConsoleMsg("Grove: Skipping track with missing GUID.\n")
+      elseif guid_set[guid] then
+        reaper.ShowConsoleMsg("Grove: Ignoring duplicate GUID during calibration save: " .. guid .. "\n")
+      else
+        guid_set[guid] = true
+        guid_list[#guid_list + 1] = guid
+      end
+    end
+  end
+        if #guid_list == 0 then
             reaper.ShowConsoleMsg("Grove: No track GUIDs to save.\n")
             return 0
         end
-        local json = "[" .. table.concat(parts, ",") .. "]"
+        local json = R.JSON.stringify(guid_list)
         reaper.SetProjExtState(0, "GROVE_STEMS", "TargetGUIDs", json)
-        reaper.ShowConsoleMsg("Grove: Calibration saved " .. #parts .. " GUID(s).\n")
-        return #parts
+        reaper.ShowConsoleMsg("Grove: Calibration saved " .. #guid_list .. " GUID(s).\n")
+        return #guid_list
     end
 
     function R.Calibration.get_count()
@@ -74,5 +85,18 @@ return function(R, JSON)
         local count = 0
         for _ in pairs(guids) do count = count + 1 end
         return count
+    end
+
+    --- Return a { guid → track } map of currently valid calibrated tracks.
+    -- Loads calibration data from ExtState, validates it, and returns
+    -- only the GUIDs that still point to existing REAPER tracks.
+    -- Returns nil if no calibration data exists or all GUIDs are stale.
+    -- Used by MatchingEngine as the primary track set for calibrated matching.
+    -- @return table|nil — { guid_string → MediaTrack } or nil
+    function R.Calibration.get_track_map()
+        local raw = R.Calibration.load()
+        if not raw then return nil end
+        local valid, _ = R.Calibration.validate(raw)
+        return valid  -- valid is { guid → track } from validate()
     end
 end
