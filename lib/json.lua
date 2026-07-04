@@ -199,4 +199,39 @@ function M.parse(str)
     return result
 end
 
+function M.stringify(val, pretty)
+  local function _serialize(v, indent)
+    local t = type(v)
+    if t == "nil" then return "null"
+    elseif t == "boolean" then return tostring(v)
+    elseif t == "number" then return tostring(v)
+    elseif t == "string" then
+      -- backslash FIRST, then quote: http://lua-users.org/wiki/JsonStream
+      return '"' .. v:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\r', '\\r'):gsub('\t', '\\t'):gsub('\f', '\\f') .. '"'
+    elseif t == "table" then
+      local is_array = true
+      local max_idx = 0
+      for k in pairs(v) do
+        if type(k) ~= "number" or k < 1 then is_array = false; break end
+        if k > max_idx then max_idx = k end
+      end
+      if is_array then
+        local parts = {}
+        for i = 1, max_idx do
+          parts[i] = _serialize(v[i])
+        end
+        return "[" .. table.concat(parts, ",") .. "]"
+      else
+        local parts = {}
+        for k, val in pairs(v) do
+          parts[#parts + 1] = _serialize(k) .. ":" .. _serialize(val)
+        end
+        return "{" .. table.concat(parts, ",") .. "}"
+      end
+    else return '"' .. tostring(v) .. '"'
+    end
+  end
+  return _serialize(val)
+end
+
 return M

@@ -149,7 +149,14 @@
         "swells": "pad",
         "drone": "pad",
         "bed": "pad",
-        "texture_pad": "pad"
+        "texture_pad": "pad",
+        "ohat": "hhat",
+        "chat": "hhat",
+        "chats": "hhat",
+        "fxs": "hhat",
+        "fxshat": "hhat",
+        "melody": "midi",
+        "sample": "smp"
     },
     "keywords_ignore": [
         "v1",
@@ -213,6 +220,16 @@
     ],
     "overflow_behavior": "lanes",
     "max_lanes_per_track": 6,
+    "version": "2.0",
+    "fuzzy_threshold": 0.7,
+    "alias_priority": "best-match",
+    "lanes_mode": "auto",
+    "color_stems_by_track": true,
+    "ai_config": {
+        "provider": "",
+        "model": "gpt-4o-mini",
+        "timeout_seconds": 30
+    },
     "categories": {
         "sub_bass": {
             "overflow_behavior": "new_track"
