@@ -1,19 +1,6 @@
-# Stem Import Engine Specification
+# Delta for Stem Import Engine
 
-## Purpose
-
-Scan stem audio directory, normalize filenames via `route_map.json` synonyms, match to REAPER tracks by name or calibrated GUID, and insert media items at project start in a single undo block.
-
-## Requirements
-
-### Requirement: Scan Audio Files
-
-The system MUST scan the configured directory and collect all `.wav`, `.flac`, and `.mp3` files.
-
-| Scenario | GIVEN | WHEN | THEN |
-|----------|-------|------|------|
-| Read stem folder | directory with 10 `.wav` stems | scan runs | 10 files found |
-| Non-audio ignored | directory with audio + `.txt` files | scan runs | only audio files collected |
+## MODIFIED Requirements
 
 ### Requirement: Name Normalization
 
@@ -54,11 +41,3 @@ The system MUST insert matched stems as media items at project position 0.0 on t
 - WHEN insertion runs
 - THEN all 8 items created at 0.0, each matching track color
 - AND REAPER undo shows one "Import Stems" entry
-
-### Requirement: Cross-Platform Paths
-
-All file paths MUST be normalized to forward slashes regardless of OS.
-
-- GIVEN a Windows path `"C:\stems\kick.wav"`
-- WHEN the script processes the path
-- THEN it is stored as `"C:/stems/kick.wav"`
