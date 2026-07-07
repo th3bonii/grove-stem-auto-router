@@ -36,16 +36,46 @@ return function(R, JSON)
     function R.Calibration.validate(guid_map)
         local valid = {}
         local stale = {}
-        for guid in pairs(guid_map) do
-            local ok, track = pcall(reaper.BR_GetMediaTrackByGUID, 0, guid)
-            if ok and track then
-                valid[guid] = track
-            else
-                stale[#stale + 1] = guid
+        local fallback = false
+
+        -- Try SWS BR_GetMediaTrackByGUID first (fast, direct lookup)
+        if reaper.BR_GetMediaTrackByGUID then
+            for guid in pairs(guid_map) do
+                local ok, track = pcall(reaper.BR_GetMediaTrackByGUID, 0, guid)
+                if ok and track then
+                    valid[guid] = track
+                else
+                    stale[#stale + 1] = guid
+                end
+            end
+        else
+            -- Fallback: enumerate all tracks and compare GUIDs
+            -- Works without SWS Extension (native REAPER API only)
+            fallback = true
+            reaper.ShowConsoleMsg("Grove: SWS not available — using brute-force GUID validation.\n")
+
+            -- Build a reverse map once: guid → track for all current tracks
+            local live_map = {}
+            for i = 0, reaper.CountTracks(0) - 1 do
+                local track = reaper.GetTrack(0, i)
+                local ok_g, guid = pcall(reaper.GetTrackGUID, track)
+                if ok_g and guid and guid ~= "" then
+                    live_map[guid] = track
+                end
+            end
+
+            for guid in pairs(guid_map) do
+                if live_map[guid] then
+                    valid[guid] = live_map[guid]
+                else
+                    stale[#stale + 1] = guid
+                end
             end
         end
+
         if #stale > 0 then
-            reaper.ShowConsoleMsg("Grove: " .. #stale .. " stale GUID(s). Falling back to name match.\n")
+            reaper.ShowConsoleMsg("Grove: " .. #stale .. " stale GUID(s). "
+                .. (fallback and "Track removed or renamed." or "Falling back to name match.") .. "\n")
         end
         return valid, stale
     end

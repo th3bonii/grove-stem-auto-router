@@ -81,7 +81,11 @@ return function(R, JSON)
         local defaults = R.Config._defaults()
         local merged = {}
         for k, v in pairs(defaults) do
-            merged[k] = config[k] ~= nil and config[k] or v
+            if config[k] ~= nil then
+                merged[k] = config[k]
+            else
+                merged[k] = v
+            end
         end
         if merged.categories == nil then merged.categories = {} end
         return merged

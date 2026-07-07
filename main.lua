@@ -30,7 +30,7 @@
 -- 0. Error wrapper — anything that fails shows in REAPER console
 -- ══════════════════════════════════════════════════════════════════════
 
-local ok_init, init_err = pcall(function()
+local ok_init, init_err = xpcall(function()
 
 -- ══════════════════════════════════════════════════════════════════════
 -- 1. Discover script directory (needed by all modules)
@@ -94,7 +94,7 @@ if not ok_or then reaper.ShowConsoleMsg("Grove: orphan.lua not loaded (stub): " 
 local gui = dofile(script_dir .. "gui/main_window.lua")
 gui.launch(R)
 
-end) -- pcall
+end, debug.traceback) -- xpcall
 
 if not ok_init then
     reaper.ShowConsoleMsg("GROVE STEM AUTO-ROUTER ERROR:\n" .. tostring(init_err) .. "\n")

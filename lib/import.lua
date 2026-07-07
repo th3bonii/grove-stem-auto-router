@@ -35,6 +35,10 @@ return function(R)
     -- @return string — category (first alias match, or first non-ignored token)
     -- @return table — filtered token array (before alias resolution)
     function R.Import.normalize(name, config)
+        if not R.MatchingEngine or not R.MatchingEngine.tokenize then
+            local base = name:gsub("%.[^%.]+$", "")
+            return base:lower(), {}
+        end
         local tokens = R.MatchingEngine.tokenize(name)
         if #tokens == 0 then
             local base = name:gsub("%.[^%.]+$", "")

@@ -96,17 +96,22 @@ return {
         end
 
         local function run_matching(stems, tracks)
+            if not R.MatchingEngine or not R.MatchingEngine.tokenize then
+                log("ERROR: MatchingEngine not loaded. Cannot match stems.")
+                return {}
+            end
             local config = R.Config.load() or {}
             local guid_map = R.Calibration.get_track_map()  -- returns {guid→track} or nil
             local assignments = {}
             local matched_count = 0
             for idx, stem in ipairs(stems) do
-                -- compute display name (first meaningful token) and store on stem
+                -- compute display name (first meaningful token) — local, no stem mutation
                 local stem_tokens = R.MatchingEngine.tokenize and R.MatchingEngine.tokenize(stem.name)
+                local display
                 if stem_tokens and #stem_tokens > 0 then
-                    stem.display_name = stem_tokens[1]
+                    display = stem_tokens[1]
                 else
-                    stem.display_name = stem.name:gsub("%.[^%.]+$", "")
+                    display = stem.name:gsub("%.[^%.]+$", "")
                 end
 
                 -- compute category for ALL stems (used by orphan collect and overflow dispatch)
@@ -118,27 +123,336 @@ return {
                     category = "unknown"
                 end
 
-  local matched_track, matched_name, method =
-    R.Import.match_stem(stem.name, tracks, config, guid_map)
-  if matched_track then matched_count = matched_count + 1 end
-  assignments[idx] = {
-    track = matched_track,
-    name = matched_name or "(no match)",
-    method = method or "none",
-    category = category,
-    selected = false,        -- bulk-op checkbox state
-    reason = "",             -- filled below from unmatched stems
-  }
-  if matched_track then
-    assignments[idx].reason = ""
-  else
-    assignments[idx].reason = "no match"
-  end
-  end
-    return assignments
-end
+                local matched_track, matched_name, method =
+                    R.Import.match_stem(stem.name, tracks, config, guid_map)
+                if matched_track then matched_count = matched_count + 1 end
+                assignments[idx] = {
+                    track = matched_track,
+                    name = matched_name or "(no match)",
+                    display_name = display,  -- cached display name, no stem mutation
+                    method = method or "none",
+                    category = category,
+                    selected = false,        -- bulk-op checkbox state
+                    reason = "",             -- filled below from unmatched stems
+                }
+                if matched_track then
+                    assignments[idx].reason = ""
+                else
+                    assignments[idx].reason = "no match"
+                end
+            end
+            return assignments
+        end
 
-local function scan_folder()
+        -- ── AI config persistence helper (shared by scan_folder and _resolve_ai_only) ─
+        local function _save_ai_config()
+            local ai_override = R.Config.get_ai_config() or {}
+            if state.ai_provider ~= "" then ai_override.provider = state.ai_provider end
+            if state.ai_model ~= "" then ai_override.model = state.ai_model end
+            if state.ai_api_key ~= "" then ai_override.api_key = state.ai_api_key end
+            local override_str = R.JSON.stringify(ai_override)
+            local ov_file = io.open(R._script_dir .. "ai_config.json", "w")
+            if ov_file then ov_file:write(override_str) ov_file:close() end
+        end
+
+        -- ── AI curl helper (shared by scan_folder and resolve_ai) ──────────
+        -- If for_all_stems is true, sends ALL stems for AI review and updates
+        -- state.assignments immediately (used during scan). Otherwise only
+        -- sends orphans (for Resolve AI button), writes mapping.json for import.
+        local function _run_ai_curl(for_all_stems)
+            if state.ai_api_key == "" then return end
+            if not R.JSON or not R.JSON.stringify then return end
+            if for_all_stems then
+                if not state.stems or #state.stems == 0 then return end
+            else
+                if not state.orphan_data or state.orphan_data.orphan_count == 0 then return end
+            end
+
+            state.status = "AI: querying LLM..."
+            local model = (state.ai_model ~= "" and state.ai_model) or "gpt-4o-mini"
+            local provider = (state.ai_provider ~= "" and state.ai_provider) or "openai"
+            log("AI: consulting " .. model .. " via " .. provider .. "...")
+
+            -- Build prompts
+            local stem_entries = {}
+            if for_all_stems then
+                for i, s in ipairs(state.stems) do
+                    local curr = (state.assignments[i] and state.assignments[i].name) or "unmatched"
+                    stem_entries[#stem_entries + 1] = "  - " .. s.name .. " [current: " .. curr .. "]"
+                end
+            else
+                for _, o in ipairs(state.orphan_data.orphans) do
+                    stem_entries[#stem_entries + 1] = "  - " .. o.stem.name
+                end
+            end
+            local track_names = {}
+            for _, t in ipairs(state.available_tracks) do
+                track_names[#track_names + 1] = "  - " .. t.name
+            end
+
+            local system_prompt
+            local user_prompt
+            if for_all_stems then
+                system_prompt = [[You are a music production assistant specializing in stem routing.
+Review and improve stem-to-track assignments. For each stem, confirm the current
+assignment or suggest a better track based on musical function.
+
+Rules:
+- Match based on MUSICAL FUNCTION, not just text similarity
+- 808, sub, subby → any bass/sub track
+- vox, vocal, voice, rap, hook → any vocal track
+- synth, lead, pad, keys → any melody/keys track
+- gtr, guitar → any guitar track
+- fx, riser, sweep, impact, noise → any FX track
+- strings, brass, horn → any orchestral track
+- Drums/percussion elements → any drum track
+- If unsure, put it in the closest matching category track
+- NEVER create a new track name — only use available tracks
+
+Respond with ONLY a JSON object: {"assignments": {"filename.wav": "Track Name", ...}}
+Include EVERY stem in your response. No explanation, no markdown, no commentary.]]
+                user_prompt = "Review and improve these stem-to-track assignments.\n\nStems:\n"
+                    .. table.concat(stem_entries, "\n")
+                    .. "\n\nAvailable tracks:\n" .. table.concat(track_names, "\n")
+                    .. "\n\nRespond with the JSON mapping for ALL stems."
+            else
+                system_prompt = [[You are a music production assistant specializing in stem routing.
+Given a list of orphan audio stems (files that couldn't be automatically matched)
+and a list of available REAPER tracks, assign each stem to the most appropriate track.
+
+Rules:
+- Match based on MUSICAL FUNCTION, not just text similarity
+- 808, sub, subby → any bass/sub track
+- vox, vocal, voice, rap, hook → any vocal track
+- synth, lead, pad, keys → any melody/keys track
+- gtr, guitar → any guitar track
+- fx, riser, sweep, impact, noise → any FX track
+- strings, brass, horn → any orchestral track
+- Drums/percussion elements → any drum track
+- If unsure, put it in the closest matching category track
+- NEVER create a new track name — only use available tracks
+
+Respond with ONLY a JSON object: {"assignments": {"filename.wav": "Track Name", ...}}
+No explanation, no markdown, no commentary.]]
+                user_prompt = "Assign these orphan stems to the most appropriate tracks.\n\nOrphan stems:\n"
+                    .. table.concat(stem_entries, "\n")
+                    .. "\n\nAvailable tracks:\n" .. table.concat(track_names, "\n")
+                    .. "\n\nRespond with the JSON mapping."
+            end
+
+            -- Resolve timeout from config (default 60s — generous for slow LLMs)
+            local ai_cfg_timeout = (R.Config.get_ai_config() or {}).timeout_seconds or 60
+            local timeout_sec = math.max(15, tonumber(ai_cfg_timeout) or 60)
+
+            local base_url = state.ai_api_url
+            if base_url == "" then
+                if provider == "gemini" then base_url = "https://generativelanguage.googleapis.com/v1beta"
+                elseif provider == "opencode" then base_url = "https://api.opencode.ai/v1"
+                else base_url = "https://api.openai.com/v1" end
+            end
+            local function shdq(s)
+                return s:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("%$", "\\$"):gsub("`", "\\`")
+            end
+
+            local req_str, curl_url, curl_auth_header, parse_response
+            local is_gemini = provider == "gemini"
+
+            if is_gemini then
+                local gemini_req = {
+                    contents = {
+                        { role = "user", parts = { { text = user_prompt } } },
+                    },
+                    system_instruction = { parts = { { text = system_prompt } } },
+                    generationConfig = { response_mime_type = "application/json", temperature = 0.1 },
+                }
+                req_str = R.JSON.stringify(gemini_req)
+                curl_url = base_url .. "/models/" .. model .. ":generateContent"
+                curl_auth_header = ' -H "X-Goog-Api-Key: ' .. shdq(state.ai_api_key) .. '"'
+                parse_response = function(body)
+                    local ok, resp = pcall(R.JSON.parse, body)
+                    if not ok or not resp then return end
+                    if resp.candidates and resp.candidates[1]
+                       and resp.candidates[1].content
+                       and resp.candidates[1].content.parts
+                       and resp.candidates[1].content.parts[1] then
+                        return resp.candidates[1].content.parts[1].text
+                    end
+                end
+            else
+                local oai_req = {
+                    model = model,
+                    messages = {
+                        { role = "system", content = system_prompt },
+                        { role = "user", content = user_prompt },
+                    },
+                    temperature = 0.1,
+                }
+                -- JSON mode: only for known OpenAI-compatible providers that support it.
+                -- Kilo Gateway's auto-free tier and custom "other" endpoints may route
+                -- to models that don't support response_format, so we skip it there.
+                local known_json_mode = provider == "openai" or provider == "opencode"
+                if known_json_mode then
+                    oai_req.response_format = { type = "json_object" }
+                end
+                req_str = R.JSON.stringify(oai_req)
+                curl_url = base_url .. "/chat/completions"
+                curl_auth_header = ' -H "Authorization: Bearer ' .. shdq(state.ai_api_key) .. '"'
+                parse_response = function(body)
+                    local ok, resp = pcall(R.JSON.parse, body)
+                    if not ok or not resp then return end
+                    if resp.choices and resp.choices[1] and resp.choices[1].message then
+                        return resp.choices[1].message.content
+                    elseif resp.error then
+                        log("AI API error: " .. (resp.error.message or "unknown"))
+                    end
+                end
+            end
+
+            -- Write request body to a native Windows temp path so curl.exe can read it
+            local win_temp = os.getenv("TEMP") or os.getenv("TMP") or "C:\\Temp"
+            local req_tag = tostring(os.time()):gsub("%D", "")
+            local req_path = win_temp .. "\\grovereq_" .. req_tag .. ".json"
+            local out_path = win_temp .. "\\groveresp_" .. req_tag .. ".json"
+            local req_f = io.open(req_path, "w")
+            if req_f then
+                req_f:write(req_str)
+                req_f:close()
+                local curl_opts = '--max-time ' .. timeout_sec .. ' --connect-timeout 15'
+                -- Simple curl command: -d @file (Windows native path), -o outfile, no pipes
+                local curl_cmd = 'curl -sS ' .. curl_opts .. ' ' .. curl_url
+                    .. ' -H "Content-Type: application/json"'
+                    .. curl_auth_header
+                    .. ' -d @"' .. req_path .. '" -o "' .. out_path .. '"'
+                local exec_ms = math.min(timeout_sec * 1000 + 5000, 120000)
+                local ret, err_out = reaper.ExecProcess(curl_cmd, exec_ms)
+                pcall(os.remove, req_path)
+                -- Read response from native Windows temp path
+                local stdout = ""
+                local rf = io.open(out_path, "r")
+                if rf then stdout = rf:read("*a"); rf:close(); pcall(os.remove, out_path) end
+                if not ret then
+                    log("AI: curl command failed — check network, API key, and URL")
+                elseif stdout and stdout ~= "" then
+                    local content = parse_response(stdout)
+                    if content and content ~= "" then
+                        local ok2, mapping = pcall(R.JSON.parse, content)
+                        if ok2 and mapping and mapping.assignments then
+                            if for_all_stems then
+                                -- Apply AI assignments to state.assignments immediately
+                                local changed = 0
+                                for filename, track_name in pairs(mapping.assignments) do
+                                    for i, s in ipairs(state.stems) do
+                                        if s.name == filename then
+                                            for _, t in ipairs(state.available_tracks) do
+                                                if t.name:lower() == track_name:lower() then
+                                                    local old_name = (state.assignments[i] and state.assignments[i].name) or "?"
+                                                    if old_name ~= t.name then
+                                                        changed = changed + 1
+                                                    end
+                                                    state.assignments[i] = {
+                                                        track = t.track,
+                                                        name = t.name,
+                                                        category = "ai",
+                                                        selected = true,
+                                                        reason = "ai",
+                                                        method = "ai",
+                                                    }
+                                                    break
+                                                end
+                                            end
+                                            break
+                                        end
+                                    end
+                                end
+                                -- Recompute orphan_data after AI update
+                                if R.Orphan and R.Orphan.collect then
+                                    state.orphan_data = R.Orphan.collect(state.stems, state.assignments)
+                                end
+                                log("AI: updated " .. changed .. " assignment(s) across all stems")
+                            else
+                                -- Orphan mode: write mapping.json for import
+                                local mapping_str = R.JSON.stringify({
+                                    assignments = mapping.assignments, status = "success",
+                                })
+                                local mf = io.open(R._script_dir .. "mapping.json", "w")
+                                if mf then mf:write(mapping_str); mf:close() end
+                                local count = 0
+                                for _ in pairs(mapping.assignments) do count = count + 1 end
+                                log("AI: " .. count .. " orphan mapping(s) resolved")
+                            end
+                        else
+                            log("AI: response wasn't valid JSON: " .. (content:sub(1, 120) or "empty"))
+                        end
+                    end
+                else
+                    log("AI: response file was empty — ret=" .. tostring(ret))
+                end
+            end
+        end
+
+        -- ── Lightweight AI re-resolution (preserves manual assignments) ──
+        local function _resolve_ai_only()
+            if state.ai_api_key == "" then
+                log("AI: set an API key first (see AI ASSISTANT section).")
+                return
+            end
+            if not state.orphan_data or state.orphan_data.orphan_count == 0 then
+                log("AI: no orphans to resolve.")
+                return
+            end
+            -- Re-export current orphans and re-run AI
+            local config = R.Config.load() or {}
+            if R.Orphan and R.Orphan.export_for_ai then
+                R.Orphan.export_for_ai(state.orphan_data, state.available_tracks, R._script_dir, config)
+                _save_ai_config()
+            end
+            _run_ai_curl()
+            -- Apply AI mapping immediately (same logic as do_import)
+            if R.Orphan and R.Orphan.check_ai_mapping then
+                local mapping = R.Orphan.check_ai_mapping(R._script_dir, state.orphan_data)
+                if mapping and mapping.assignments and next(mapping.assignments) then
+                    local ai_count = 0
+                    for filename, track_name in pairs(mapping.assignments) do
+                        local orphan_stem
+                        for _, o in ipairs(state.orphan_data.orphans) do
+                            if o.stem.name == filename then
+                                orphan_stem = o
+                                break
+                            end
+                        end
+                        if orphan_stem then
+                            for _, t in ipairs(state.available_tracks) do
+                                if t.name:lower() == track_name:lower() then
+                                    R.Import.insert_media(orphan_stem.stem.path, t.track, nil, config)
+                                    state.assignments[orphan_stem.index] = {
+                                        track = t.track,
+                                        name = t.name,
+                                        category = "ai",
+                                        selected = false,
+                                        reason = "ai",
+                                        method = "ai",
+                                    }
+                                    ai_count = ai_count + 1
+                                    break
+                                end
+                            end
+                        end
+                    end
+                    -- Refresh orphan_data and update UI state
+                    if R.Orphan and R.Orphan.collect then
+                        state.orphan_data = R.Orphan.collect(state.stems, state.assignments)
+                        for _, o in ipairs(state.orphan_data.orphans) do
+                            local aa = state.assignments[o.index]
+                            if aa then o.selected = aa.selected end
+                        end
+                    end
+                    log("AI assigned " .. ai_count .. " orphan(s)")
+                    state.status = "AI resolved " .. ai_count .. " orphan(s)"
+                end
+            end
+        end
+
+        local function scan_folder()
             state.error_msg = nil
             local config = R.Config.load() or {}
             local stems = R.Import.scan(state.folder_path)
@@ -158,180 +472,31 @@ local function scan_folder()
             state.stem_count = #stems
             state.available_tracks = collect_tracks()
             state.assignments = run_matching(stems, state.available_tracks)
-  -- Collect orphan data for the orphans section
-  state.orphan_data = R.Orphan.collect(stems, state.assignments)
-  -- Sync bulk-selection state from assignments → orphan entries (scan→import gap)
-  for _, o in ipairs(state.orphan_data.orphans) do
-    local a = state.assignments[o.index]
-    if a then o.selected = a.selected end
-  end
-  log("Matched: " .. state.orphan_data.matched_count .. ", Orphans: " .. state.orphan_data.orphan_count)
-
-            -- Export orphans for AI proxy if AI is configured
-            if state.orphan_data and state.orphan_data.orphan_count > 0 then
-                R.Orphan.export_for_ai(state.orphan_data, state.available_tracks, R._script_dir, config)
-                -- Override ai_config.json with GUI state values (persisted via ExtState)
-                local ai_override = R.Config.get_ai_config() or {}
-                if state.ai_provider ~= "" then ai_override.provider = state.ai_provider end
-                if state.ai_model ~= "" then ai_override.model = state.ai_model end
-                if state.ai_api_key ~= "" then ai_override.api_key = state.ai_api_key end
-                local override_str = R.JSON.stringify(ai_override)
-                local ov_file = io.open(R._script_dir .. "ai_config.json", "w")
-                if ov_file then ov_file:write(override_str) ov_file:close() end
-            end
-
-            -- ── AI: call LLM directly via curl ────────────────────────────
-            if state.orphan_data and state.orphan_data.orphan_count > 0
-               and state.ai_api_key ~= "" then
-                state.status = "AI: querying LLM..."
-                local model = (state.ai_model ~= "" and state.ai_model) or "gpt-4o-mini"
-                local provider = (state.ai_provider ~= "" and state.ai_provider) or "openai"
-                log("AI: consulting " .. model .. " via " .. provider .. "...")
-
-                -- Build prompts (shared by all providers)
-                local orphan_names = {}
+            -- Collect orphan data for the orphans section
+            if R.Orphan and R.Orphan.collect then
+                state.orphan_data = R.Orphan.collect(stems, state.assignments)
+                -- Sync bulk-selection state from assignments → orphan entries (scan→import gap)
                 for _, o in ipairs(state.orphan_data.orphans) do
-                    orphan_names[#orphan_names + 1] = "  - " .. o.stem.name
+                    local a = state.assignments[o.index]
+                    if a then o.selected = a.selected end
                 end
-                local track_names = {}
-                for _, t in ipairs(state.available_tracks) do
-                    track_names[#track_names + 1] = "  - " .. t.name
-                end
-
-                local system_prompt = [[You are a music production assistant specializing in stem routing.
-Given a list of orphan audio stems (files that couldn't be automatically matched)
-and a list of available REAPER tracks, assign each stem to the most appropriate track.
-
-Rules:
-- Match based on MUSICAL FUNCTION, not just text similarity
-- 808, sub, subby → any bass/sub track
-- vox, vocal, voice, rap, hook → any vocal track
-- synth, lead, pad, keys → any melody/keys track
-- gtr, guitar → any guitar track
-- fx, riser, sweep, impact, noise → any FX track
-- strings, brass, horn → any orchestral track
-- Drums/percussion elements → any drum track
-- If unsure, put it in the closest matching category track
-- NEVER create a new track name — only use available tracks
-
-Respond with ONLY a JSON object: {"assignments": {"filename.wav": "Track Name", ...}}
-No explanation, no markdown, no commentary.]]
-
-                local user_prompt = "Assign these orphan stems to the most appropriate tracks.\n\nOrphan stems:\n"
-                    .. table.concat(orphan_names, "\n")
-                    .. "\n\nAvailable tracks:\n" .. table.concat(track_names, "\n")
-                    .. "\n\nRespond with the JSON mapping."
-
-                local base_url = state.ai_api_url
-                if base_url == "" then
-                    if provider == "gemini" then base_url = "https://generativelanguage.googleapis.com/v1beta"
-                    elseif provider == "opencode" then base_url = "https://api.opencode.ai/v1"
-                    else base_url = "https://api.openai.com/v1" end
-                end
-
-                local function shdq(s)
-                    -- Escape string for use inside shell double-quoted context
-                    return s:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("%$", "\\$"):gsub("`", "\\`")
-                end
-
-                local req_str, curl_url, curl_auth_header, parse_response
-                local is_gemini = provider == "gemini"
-
-                if is_gemini then
-                    -- ── Gemini native format ──────────────────────────────
-                    local gemini_req = {
-                        contents = {
-                            {
-                                role = "user",
-                                parts = { { text = user_prompt } },
-                            },
-                        },
-                        system_instruction = {
-                            parts = { { text = system_prompt } },
-                        },
-                        generationConfig = {
-                            response_mime_type = "application/json",
-                            temperature = 0.1,
-                        },
-                    }
-                    req_str = R.JSON.stringify(gemini_req)
-                    curl_url = base_url .. "/models/" .. model .. ":generateContent"
-                    curl_auth_header = ' -H "X-Goog-Api-Key: ' .. shdq(state.ai_api_key) .. '"'
-                    parse_response = function(body)
-                        local ok, resp = pcall(R.JSON.parse, body)
-                        if not ok or not resp then return end
-                        if resp.candidates and resp.candidates[1]
-                           and resp.candidates[1].content
-                           and resp.candidates[1].content.parts
-                           and resp.candidates[1].content.parts[1] then
-                            return resp.candidates[1].content.parts[1].text
-                        end
-                    end
-                else
-                    -- ── OpenAI-compatible format (openai, opencode, custom) ──
-                    local oai_req = {
-                        model = model,
-                        messages = {
-                            { role = "system", content = system_prompt },
-                            { role = "user", content = user_prompt },
-                        },
-                        temperature = 0.1,
-                        response_format = { type = "json_object" },
-                    }
-                    req_str = R.JSON.stringify(oai_req)
-                    curl_url = base_url .. "/chat/completions"
-                    curl_auth_header = ' -H "Authorization: Bearer ' .. shdq(state.ai_api_key) .. '"'
-                    parse_response = function(body)
-                        local ok, resp = pcall(R.JSON.parse, body)
-                        if not ok or not resp then return end
-                        if resp.choices and resp.choices[1] and resp.choices[1].message then
-                            return resp.choices[1].message.content
-                        elseif resp.error then
-                            log("AI API error: " .. (resp.error.message or "unknown"))
-                        end
-                    end
-                end
-
-                -- Write request to temp file and call API via curl
-                local tmp_path = R._script_dir .. "_ai_request.json"
-                local tmp_f = io.open(tmp_path, "w")
-                if tmp_f then
-                    tmp_f:write(req_str)
-                    tmp_f:close()
-
-                    local curl_cmd = 'curl -s ' .. curl_url
-                        .. ' -H "Content-Type: application/json"'
-                        .. curl_auth_header
-                        .. ' -d @' .. tmp_path
-
-                    local ret, stdout = reaper.ExecProcess(curl_cmd, 30000)
-                    os.remove(tmp_path)
-
-                    if not ret then
-                        log("AI: curl command failed — check network, API key, and URL")
-                    elseif stdout and stdout ~= "" then
-                        local content = parse_response(stdout)
-                        if content and content ~= "" then
-                            local ok2, mapping = pcall(R.JSON.parse, content)
-                            if ok2 and mapping and mapping.assignments then
-                                local mapping_str = R.JSON.stringify({
-                                    assignments = mapping.assignments,
-                                    status = "success",
-                                })
-                                local mf = io.open(R._script_dir .. "mapping.json", "w")
-                                if mf then mf:write(mapping_str); mf:close() end
-                                local count = 0
-                                for _ in pairs(mapping.assignments) do count = count + 1 end
-                                log("AI: " .. count .. " mapping(s) resolved")
-                            else
-                                log("AI: response wasn't valid JSON: " .. (content:sub(1, 120) or "empty"))
-                            end
-                        end
-                    else
-                        log("AI: API returned empty response (curl succeeded but no output)")
-                    end
-                end
+                log("Matched: " .. state.orphan_data.matched_count .. ", Orphans: " .. state.orphan_data.orphan_count)
+            else
+                state.orphan_data = nil
+                log("Orphan module not loaded — no orphan tracking available.")
             end
+
+            -- Export orphans for AI proxy only if AI is actually configured
+            local ai_cfg_has_key = R.Config.get_ai_config().api_key or state.ai_api_key or ""
+            if state.orphan_data and state.orphan_data.orphan_count > 0
+               and R.Orphan and R.Orphan.export_for_ai
+               and (ai_cfg_has_key ~= "" or state.ai_provider ~= "") then
+                R.Orphan.export_for_ai(state.orphan_data, state.available_tracks, R._script_dir, config)
+                _save_ai_config()
+            end
+
+            -- ── AI: call LLM directly via curl (review ALL stems) ──────────
+            _run_ai_curl(true)
 
             state.scanned = true
             log("Found " .. #stems .. " stem(s) across " .. #state.available_tracks .. " track(s)")
@@ -421,51 +586,60 @@ No explanation, no markdown, no commentary.]]
                     local used = {}
                     for i, entry in ipairs(stems) do
                         local tr = sib_tracks[(i - 1) % nt + 1]
-                        local guid = tostring(tr.track)
+                        local guid = tr.guid
                         if not used[guid] then
                             R.Import.insert_media(entry.stem.path, tr.track, nil, config)
                             used[guid] = true; ins = ins + 1
                         else
-                            R.Overflow.dispatch(entry.stem, tr.track, config, ovf, entry.cat)
+                            R.Overflow.dispatch(entry.stem, tr.track, config, entry.cat)
                             ovf = ovf + 1
                         end
                     end
                 end
             end
 
-  -- After matched imports, create new tracks for selected no-match stems
-  for idx, stem in ipairs(state.stems) do
-    local a = state.assignments[idx]
-    if a and a.selected and not a.track then
-      local cfg2 = R.Config.load() or {}
-  local orphan_entry = {
-    stem = stem,
-    category = a.category or "unknown",
-    display = stem.display_name or stem.name,
-    reason = a.reason or "no match",
-  }
-  local new_track = R.Orphan._create_track_from_orphan(orphan_entry, cfg2)
-  if new_track then
-    -- _create_track_from_orphan already inserts the media onto the new track
-    ins = ins + 1
-    a.track = new_track
-    a.name = stem.name:gsub("%.[^%.]+$", "")
-    a.selected = false
-    a.reason = ""
-  end
-end
-end
-  end
+            -- After matched imports, create new tracks for selected no-match stems
+            if R.Orphan and R.Orphan._create_track_from_orphan then
+                for idx, stem in ipairs(state.stems) do
+                    local a = state.assignments[idx]
+                    if a and a.selected and not a.track then
+                        local cfg2 = R.Config.load() or {}
+                        local orphan_entry = {
+                            stem = stem,
+                            category = a.category or "unknown",
+                            display = a.display_name or stem.name,
+                            reason = a.reason or "no match",
+                        }
+                        local new_track = R.Orphan._create_track_from_orphan(orphan_entry, cfg2)
+                        if new_track then
+                            -- _create_track_from_orphan already inserts the media onto the new track
+                            ins = ins + 1
+                            a.track = new_track
+                            a.name = stem.name:gsub("%.[^%.]+$", "")
+                            a.selected = false
+                            a.reason = ""
+                        end
+                    end
+                end
+            end
 
-  -- After import loop, try AI mapping for remaining orphans
-  if state.orphan_data and state.orphan_data.orphan_count > 0
-               and (state.ai_provider ~= "" or R.Config.get_ai_config().provider ~= "") then
+            -- Build set of stems already inserted via Create Selected to prevent AI double-insert
+            local inserted_stems = {}
+            for idx, stem in ipairs(state.stems) do
+                local a = state.assignments[idx]
+                if a and a.track and not a.selected and a.reason == "" then
+                    inserted_stems[stem.path] = true
+                end
+            end
+
+            -- After import loop, try AI mapping for remaining orphans
+            if state.orphan_data and state.orphan_data.orphan_count > 0
+                and R.Orphan and R.Orphan.check_ai_mapping
+                and (state.ai_provider ~= "" or R.Config.get_ai_config().provider ~= "") then
                 local mapping = R.Orphan.check_ai_mapping(R._script_dir, state.orphan_data)
                 if mapping and mapping.assignments and next(mapping.assignments) then
-                    -- Apply AI mappings
                     local ai_count = 0
                     for filename, track_name in pairs(mapping.assignments) do
-                        -- Find the orphan stem by filename
                         local found_stem = false
                         local orphan_stem
                         for _, o in ipairs(state.orphan_data.orphans) do
@@ -478,13 +652,16 @@ end
                         if not found_stem then
                             log("AI: orphan stem '" .. filename .. "' not found — possibly already assigned")
                         else
-                            -- Find the track by name
                             local found_track = false
                             for _, t in ipairs(state.available_tracks) do
                                 if t.name:lower() == track_name:lower() then
-                                    R.Import.insert_media(orphan_stem.stem.path, t.track, nil, config)
-                                    ai_count = ai_count + 1
-                                    ins = ins + 1
+                                    if inserted_stems[orphan_stem.stem.path] then
+                                        log("AI: skipping " .. filename .. " — already inserted via Create Selected")
+                                    else
+                                        R.Import.insert_media(orphan_stem.stem.path, t.track, nil, config)
+                                        ai_count = ai_count + 1
+                                        ins = ins + 1
+                                    end
                                     found_track = true
                                     break
                                 end
@@ -495,19 +672,29 @@ end
                         end
                     end
                     if ai_count > 0 then
+                        skip = math.max(0, skip - ai_count)
                         log("AI assigned " .. ai_count .. " orphan(s)")
                     end
+                end
+            end
+
+            -- Refresh orphan_data after selected-orphan and AI inserts
+            if R.Orphan and R.Orphan.collect then
+                state.orphan_data = R.Orphan.collect(state.stems, state.assignments)
+                for _, o in ipairs(state.orphan_data.orphans) do
+                    local aa = state.assignments[o.index]
+                    if aa then o.selected = aa.selected end
                 end
             end
 
             reaper.Undo_EndBlock(WINDOW_TITLE, 0)
             reaper.PreventUIRefresh(-1)
 
-        local orphan_count = state.orphan_data and state.orphan_data.orphan_count or 0
-        local msg = ins .. " inserted, " .. ovf .. " overflowed, " .. skip .. " skipped"
-            .. (orphan_count > 0
-                and (", " .. orphan_count .. " orphan(s) — use auto-insert or manual reassign")
-                or "")
+            local orphan_count = state.orphan_data and state.orphan_data.orphan_count or 0
+            local msg = ins .. " inserted, " .. ovf .. " overflowed, " .. skip .. " skipped"
+                .. (orphan_count > 0
+                    and (", " .. orphan_count .. " remaining orphan(s)")
+                    or "")
             log(msg); state.status = msg
             state.running = false
         end
@@ -519,6 +706,30 @@ end
         if ok_wp and pad_x then
             min_w = 300 + 2 * pad_x
             pad_y = tmp_pad_y or pad_x
+        end
+
+        -- ── track selection helper (deduplicates combo handler code) ────
+        local function _select_track_for_stem(idx, t)
+            local existing = state.assignments[idx]
+            state.assignments[idx] = {
+                track = t.track,
+                name = t.name,
+                category = (existing and existing.category) or "unknown",
+                selected = (existing and existing.selected) or false,
+                reason = "",
+                method = "manual",
+            }
+            local guid = t.guid
+            for ri = #state.recent_guids, 1, -1 do
+                if state.recent_guids[ri] == guid then
+                    table.remove(state.recent_guids, ri)
+                end
+            end
+            table.insert(state.recent_guids, 1, guid)
+            if #state.recent_guids > 20 then
+                table.remove(state.recent_guids)
+            end
+            save_prefs()
         end
 
         -- ── defer render loop ──────────────────────────────────────────
@@ -639,13 +850,13 @@ end
                 else
                     ImGui.ImGui_Text(ctx, "No calibration data")
                 end
-ImGui.ImGui_SameLine(ctx)
-if ImGui.ImGui_Button(ctx, "Show Manifest", 90) then
-    state.show_manifest = not state.show_manifest
-    if state.show_manifest then state.sidebar_visible = true end
-    state.last_content_h = nil  -- allow resize for sidebar
-end
-ImGui.ImGui_Spacing(ctx)
+                ImGui.ImGui_SameLine(ctx)
+                if ImGui.ImGui_Button(ctx, "Show Manifest", 90) then
+                    state.show_manifest = not state.show_manifest
+                    if state.show_manifest then state.sidebar_visible = true end
+                    state.last_content_h = nil  -- allow resize for sidebar
+                end
+                ImGui.ImGui_Spacing(ctx)
 
                 -- ════════════════════════════════════════════════════════
                 --  AI SETTINGS
@@ -669,10 +880,10 @@ ImGui.ImGui_Spacing(ctx)
                     local cur_url      = state.ai_api_url
                     if cur_url == "" then cur_url = default_api_url(cur_provider) end
 
-                    -- Provider dropdown
+                    -- Provider dropdown (includes "other" for custom OpenAI-compatible endpoints)
                     ImGui.ImGui_SetNextItemWidth(ctx, -80)
                     if ImGui.ImGui_BeginCombo(ctx, "##provider", cur_provider) then
-                        local providers = {"openai", "opencode", "gemini"}
+                        local providers = {"openai", "opencode", "gemini", "other"}
                         for i, p in ipairs(providers) do
                             local sel = p == cur_provider
                             if ImGui.ImGui_Selectable(ctx, p, sel) then
@@ -691,9 +902,16 @@ ImGui.ImGui_Spacing(ctx)
                     local ch_m, new_model = ImGui.ImGui_InputText(ctx, "##model", cur_model)
                     if ch_m then state.ai_model = new_model; save_prefs() end
 
+                    -- Align API label + input fields so they start at the same X
+                    local key_sz = ImGui.ImGui_CalcTextSize(ctx, "API Key:")
+                    local url_sz = ImGui.ImGui_CalcTextSize(ctx, "API URL:")
+                    local ai_lbl_w = math.max(key_sz or 0, url_sz or 0)
+
                     -- API Key (masked by ImGui InputTextFlags_Password, value stays real)
+                    ImGui.ImGui_AlignTextToFramePadding(ctx)
+                    local lbl_x = ImGui.ImGui_GetCursorPosX(ctx)
                     ImGui.ImGui_Text(ctx, "API Key:")
-                    ImGui.ImGui_SameLine(ctx, 0, 4)
+                    ImGui.ImGui_SameLine(ctx, lbl_x + ai_lbl_w + 8)
                     ImGui.ImGui_SetNextItemWidth(ctx, -1)
                     local ch_k, new_key = ImGui.ImGui_InputText(ctx, "##api_key", state.ai_api_key,
                         ImGui.ImGui_InputTextFlags_Password())
@@ -703,8 +921,10 @@ ImGui.ImGui_Spacing(ctx)
                     end
 
                     -- API URL (editable, with provider-appropriate default)
+                    ImGui.ImGui_AlignTextToFramePadding(ctx)
+                    lbl_x = ImGui.ImGui_GetCursorPosX(ctx)
                     ImGui.ImGui_Text(ctx, "API URL:")
-                    ImGui.ImGui_SameLine(ctx, 0, 4)
+                    ImGui.ImGui_SameLine(ctx, lbl_x + ai_lbl_w + 8)
                     ImGui.ImGui_SetNextItemWidth(ctx, -1)
                     local ch_u, new_url = ImGui.ImGui_InputText(ctx, "##api_url", cur_url)
                     if ch_u then state.ai_api_url = new_url; save_prefs() end
@@ -788,7 +1008,7 @@ ImGui.ImGui_Spacing(ctx)
                         local cb_col_w = 24
                         local max_stem_w = 0
                         for _, s in ipairs(state.stems) do
-                            local w, _ = ImGui.ImGui_CalcTextSize(ctx, s.name)
+                            local w = ImGui.ImGui_CalcTextSize(ctx, s.name) or 0
                             if w > max_stem_w then max_stem_w = w end
                         end
                         local sb_cw = select(1, ImGui.ImGui_GetContentRegionAvail(ctx))
@@ -816,34 +1036,40 @@ ImGui.ImGui_Spacing(ctx)
                         end
                         ImGui.ImGui_SameLine(ctx, 0, 4)
                         if ImGui.ImGui_Button(ctx, "Create Sel", 57) then
-                            local cfg = R.Config.load() or {}
-                            local n = 0
-                            for idx, stem in ipairs(state.stems) do
-                                local a = state.assignments[idx]
-                                if a and a.selected and not a.track then
-                                    local o = {stem=stem, category=a.category or "unknown",
-                                               display=stem.display_name or stem.name, reason=a.reason or "no match"}
-                                    R.Orphan._create_track_from_orphan(o, cfg); n = n + 1
+                            if not R.Orphan or not R.Orphan._create_track_from_orphan then
+                                log("Orphan module not loaded.")
+                            else
+                                local cfg = R.Config.load() or {}
+                                local n = 0
+                                for idx, stem in ipairs(state.stems) do
+                                    local a = state.assignments[idx]
+                                    if a and a.selected and not a.track then
+                                        local o = {stem=stem, category=a.category or "unknown",
+                                                   display=a.display_name or stem.name, reason=a.reason or "no match"}
+                                        R.Orphan._create_track_from_orphan(o, cfg); n = n + 1
+                                    end
                                 end
-                            end
-                            if n > 0 then
-                                log("Created " .. n .. " new track(s) from selected stems.")
-                                state.orphan_data = R.Orphan.collect(state.stems, state.assignments)
-                                for _, o in ipairs(state.orphan_data.orphans) do
-                                    local aa = state.assignments[o.index]
-                                    if aa then o.selected = aa.selected end
+                                if n > 0 then
+                                    log("Created " .. n .. " new track(s) from selected stems.")
+                                    state.orphan_data = R.Orphan.collect(state.stems, state.assignments)
+                                    for _, o in ipairs(state.orphan_data.orphans) do
+                                        local aa = state.assignments[o.index]
+                                        if aa then o.selected = aa.selected end
+                                    end
+                                    state.available_tracks = collect_tracks()
+                                else
+                                    log("No stems selected — check the box next to a stem first.")
                                 end
-                            else log("No stems selected — check the box next to a stem first.") end
-                        end
+                            end  -- guard else
+                        end  -- "Create Sel" button
                         ImGui.ImGui_SameLine(ctx, 0, 4)
                         if ImGui.ImGui_Button(ctx, "New trk", 44) then
                             reaper.InsertTrackAtIndex(reaper.CountTracks(0), true)
+                            state.available_tracks = collect_tracks()
                         end
                         ImGui.ImGui_SameLine(ctx, 0, 4)
                         if ImGui.ImGui_Button(ctx, "Resolve AI", 0) then
-                            if state.ai_api_key == "" then
-                                log("AI: set an API key first (see AI ASSISTANT section).")
-                            else scan_folder() end
+                            _resolve_ai_only()
                         end
                         ImGui.ImGui_Separator(ctx)
 
@@ -871,12 +1097,12 @@ ImGui.ImGui_Spacing(ctx)
                                 ImGui.ImGui_SameLine(ctx, cb_col_w, 4)
                                 -- truncate long names so they don't overlap the arrow/combo
                                 local name_avail = math.max(20, arrow_x - cb_col_w - 10)
-                                local nw, _ = ImGui.ImGui_CalcTextSize(ctx, stem.name)
+                                local nw = ImGui.ImGui_CalcTextSize(ctx, stem.name) or 0
                                 local display_name = stem.name
                                 if nw > name_avail then
                                     for i = #stem.name - 1, 3, -1 do
                                         local sub = stem.name:sub(1, i) .. ".."
-                                        local tw, _ = ImGui.ImGui_CalcTextSize(ctx, sub)
+                                        local tw = ImGui.ImGui_CalcTextSize(ctx, sub) or 0
                                         if tw <= name_avail then
                                             display_name = sub
                                             break
@@ -914,26 +1140,7 @@ ImGui.ImGui_Spacing(ctx)
                                     for _, t in ipairs(recent_list) do
                                         local sel = a and a.track == t.track or false
                                         if ImGui.ImGui_Selectable(ctx, t.name, sel) then
-                                            local existing = state.assignments[idx]
-                                            state.assignments[idx] = {
-                                                track = t.track,
-                                                name = t.name,
-                                                category = (existing and existing.category) or "unknown",
-                                                selected = (existing and existing.selected) or false,
-                                                reason = "",
-                                                method = "manual",
-                                            }
-                                            local guid = t.guid
-                                            for ri = #state.recent_guids, 1, -1 do
-                                                if state.recent_guids[ri] == guid then
-                                                    table.remove(state.recent_guids, ri)
-                                                end
-                                            end
-                                            table.insert(state.recent_guids, 1, guid)
-                                            if #state.recent_guids > 20 then
-                                                table.remove(state.recent_guids)
-                                            end
-                                            save_prefs()
+                                            _select_track_for_stem(idx, t)
                                         end
                                     end
                                     if has_recent and has_rest then
@@ -942,26 +1149,7 @@ ImGui.ImGui_Spacing(ctx)
                                     for _, t in ipairs(rest) do
                                         local sel = a and a.track == t.track or false
                                         if ImGui.ImGui_Selectable(ctx, t.name, sel) then
-                                            local existing = state.assignments[idx]
-                                            state.assignments[idx] = {
-                                                track = t.track,
-                                                name = t.name,
-                                                category = (existing and existing.category) or "unknown",
-                                                selected = (existing and existing.selected) or false,
-                                                reason = "",
-                                                method = "manual",
-                                            }
-                                            local guid = t.guid
-                                            for ri = #state.recent_guids, 1, -1 do
-                                                if state.recent_guids[ri] == guid then
-                                                    table.remove(state.recent_guids, ri)
-                                                end
-                                            end
-                                            table.insert(state.recent_guids, 1, guid)
-                                            if #state.recent_guids > 20 then
-                                                table.remove(state.recent_guids)
-                                            end
-                                            save_prefs()
+                                            _select_track_for_stem(idx, t)
                                         end
                                     end
                                     ImGui.ImGui_EndCombo(ctx)

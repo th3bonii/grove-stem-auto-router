@@ -1,12 +1,9 @@
 -- Grove Stem Auto-Router / lib/fuzzy.lua
--- Pure Levenshtein edit distance and token/track fuzzy matching
+-- Pure Levenshtein edit distance (used by matching-engine inline fuzzy fallback)
 -- Depends on: nothing (pure functions, no R deps)
 --
 -- Usage:
 --   local dist = R.Fuzzy.levenshtein("kicck", "kick")  -- → 1
---   local track, score = R.Fuzzy.match_best(
---     {"sub", "bass"}, {"Sub Bass", "Kick"}, 0.8
---   )  -- → "Sub Bass", 0.83...
 
 return function(R)
     R.Fuzzy = {}
@@ -45,34 +42,5 @@ return function(R)
         end
 
         return matrix[a_len][b_len]
-    end
-
-    --- Find the best fuzzy match for stem tokens against track names.
-    -- Compares each stem token against each track name using Levenshtein distance,
-    -- normalized by the longer string's length: score = 1 - (dist / max_len).
-    -- Returns the best match that meets the threshold.
-    -- @param stem_tokens table — array of lowercase stem tokens
-    -- @param track_names table — array of track name strings (will be lowercased internally)
-    -- @param threshold number — minimum score to accept (default 0.8)
-    -- @return string|nil — best matching track name
-    -- @return number — best score (0 if no match)
-    function R.Fuzzy.match_best(stem_tokens, track_names, threshold)
-        threshold = threshold or 0.8
-        local best_score, best_track = 0, nil
-
-        for _, track_name in ipairs(track_names) do
-            local t_lower = track_name:lower()
-            for _, stem_token in ipairs(stem_tokens) do
-                local dist = R.Fuzzy.levenshtein(stem_token, t_lower)
-                local max_len = math.max(#stem_token, #track_name)
-                local score = max_len > 0 and math.min(1.0, math.max(0.0, 1 - dist / max_len)) or 0
-                if score > best_score and score >= threshold then
-                    best_score = score
-                    best_track = track_name
-                end
-            end
-        end
-
-        return best_track, best_score
     end
 end

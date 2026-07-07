@@ -42,29 +42,31 @@ return function(R)
     end
 
     --- Dispatch an overflow stem to a lane or new track.
-    -- Uses config.overflow_behavior directly (the GUI-selected mode) instead of
-    -- R.Config.get_overflow(), so category-level settings don't override the
-    -- user's explicit Lines / New Track choice at import time.
+    -- Resolves behavior via R.Config.get_overflow(category) which checks:
+    --   1. Category-level overflow_behavior in route_map.json
+    --   2. Root-level overflow_behavior (fallback)
+    -- This way categories like sub_bass/drums that specify "new_track" are
+    -- respected, while the global "lanes" default still applies.
+    -- The GUI can override the root-level default via config.overflow_behavior.
     -- @param stem table — stem record { path, name }
     -- @param track reaper.MediaTrack — the matched track receiving overflow
-    -- @param config table — route_map config (with overflow_behavior set by GUI)
-    -- @param idx int — overflow index (for logging)
-    -- @param category string|nil — category from match context; nil falls back to re-parse
-    function R.Overflow.dispatch(stem, track, config, idx, category)
-        local behavior = config.overflow_behavior or "lanes"
+    -- @param config table — route_map config
+    -- @param category string|nil — stem category for per-category override
+    function R.Overflow.dispatch(stem, track, config, category)
+        local behavior = category and R.Config.get_overflow(category) or config.overflow_behavior or "lanes"
         local item_count = 0
         while reaper.GetTrackMediaItem(track, item_count) do item_count = item_count + 1 end
 
-if behavior == "lanes" then
-  local max_lanes = (config and config.max_lanes_per_track) or 0
-  if max_lanes > 0 and item_count >= max_lanes then
-    R.Overflow._to_new_track(stem, track)
-  else
-    R.Overflow._to_lane(stem, track)
-  end
-else
-  R.Overflow._to_new_track(stem, track)
-end
+        if behavior == "lanes" then
+            local max_lanes = (config and config.max_lanes_per_track) or 0
+            if max_lanes > 0 and item_count >= max_lanes then
+                R.Overflow._to_new_track(stem, track)
+            else
+                R.Overflow._to_lane(stem, track)
+            end
+        else
+            R.Overflow._to_new_track(stem, track)
+        end
     end
 
     --- Place a stem as a new lane on an existing track.
@@ -118,7 +120,13 @@ end
         for i = track_idx, 0, -1 do
             local t = reaper.GetTrack(0, i)
             local fd = reaper.GetMediaTrackInfo_Value(t, "I_FOLDERDEPTH")
-            depth = depth + fd
+            -- Skip the matched track's own I_FOLDERDEPTH when it's a folder
+            -- closer (-1): the -1 means "last track inside folder" but the
+            -- track IS inside that folder, so we must ignore its own fd to
+            -- find the parent folder start going backward.
+            if i ~= track_idx or fd ~= -1 then
+                depth = depth + fd
+            end
             if depth >= 1 then
                 folder_start = i
                 break
