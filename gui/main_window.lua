@@ -863,7 +863,6 @@ No explanation, no markdown, no commentary.]]
                 if ImGui.ImGui_Button(ctx, "Show Manifest", 90) then
                     state.show_manifest = not state.show_manifest
                     if state.show_manifest then state.sidebar_visible = true end
-                    state.last_content_h = nil  -- allow resize for sidebar
                 end
                 ImGui.ImGui_Spacing(ctx)
 
@@ -975,14 +974,17 @@ No explanation, no markdown, no commentary.]]
                     ImGui.ImGui_EndChild(ctx)  -- close ##main_col
                     ImGui.ImGui_SameLine(ctx)
                     -- sidebar height = main content height, so bottom border aligns with log
-                    local sb_open = ImGui.ImGui_BeginChild(ctx, "##sidebar", 324, main_h, 0, ImGui.ImGui_WindowFlags_NoScrollbar())
+                    local sb_open = ImGui.ImGui_BeginChild(ctx, "##sidebar", 324, main_h, 0, 0)
                     if sb_open then
-                    local sb_full_h = main_h  -- available height is the constrained child height
-                    ImGui.ImGui_Separator(ctx)
+local sb_full_h = main_h  -- available height is the constrained child height
+local sb_start_y = ImGui.ImGui_GetCursorPosY(ctx)
+ImGui.ImGui_Separator(ctx)
 
-                    -- MANIFEST
-                    if state.show_manifest then
-                        local man_h = math.max(60, math.floor(sb_full_h / 2) - 28)
+-- MANIFEST
+if state.show_manifest then
+    local sb_header_h = ImGui.ImGui_GetCursorPosY(ctx) - sb_start_y
+    local sb_avail = sb_full_h - sb_header_h
+    local man_h = math.max(60, math.floor(sb_avail * 0.4))
                         ImGui.ImGui_Text(ctx, "TEMPLATE MANIFEST")
                         local tracks = collect_tracks()
                         local guid_map = R.Calibration.get_track_map()
@@ -1084,7 +1086,8 @@ No explanation, no markdown, no commentary.]]
 
                         local stems_avail = select(2, ImGui.ImGui_GetContentRegionAvail(ctx))
                         local stems_h = math.max(60, stems_avail - 4)
-                        local sv = ImGui.ImGui_BeginChild(ctx, "##stems", 0, stems_h, 0)
+                        local stems_flags = (not state.sidebar_visible and not state.show_manifest) and ImGui.ImGui_ChildFlags_Borders() or 0
+local sv = ImGui.ImGui_BeginChild(ctx, "##stems", 0, stems_h, 0, stems_flags)
                         if sv then
                             -- orphan count at TOP
                             local orphan_count = 0
