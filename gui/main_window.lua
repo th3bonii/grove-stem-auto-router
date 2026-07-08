@@ -29,7 +29,9 @@ return {
             available_tracks = {},  -- { track, name, guid }[]
             assignments      = {},  -- stem_idx -> { track, name }
             recent_guids     = {},  -- ordered GUIDs, most recent first
-            last_content_h   = nil,  -- measured content height from previous frame
+            last_content_h_with_sb = nil,  -- content height when sidebar visible
+            last_content_h_no_sb  = nil,  -- content height when sidebar hidden
+            sidebar_visible       = true,  -- sidebar toggle state (persisted)
             orphan_data      = nil,  -- { orphans[], matched_count, orphan_count } from R.Orphan.collect()
             show_manifest    = false,  -- toggle for manifest table
             ai_provider      = "",  -- GUI-overridden AI provider (saved to ExtState)
@@ -49,6 +51,7 @@ return {
             reaper.SetExtState(S, "ai_model",      state.ai_model or "",      true)
             reaper.SetExtState(S, "ai_api_key",    state.ai_api_key or "",    true)
             reaper.SetExtState(S, "ai_api_url",    state.ai_api_url or "",    true)
+            reaper.SetExtState(S, "sidebar_visible", state.sidebar_visible and "1" or "0", true)
             if #state.recent_guids > 0 then
                 reaper.SetExtState(S, "recent_guids",
                     table.concat(state.recent_guids, ","), true)
@@ -72,6 +75,8 @@ return {
             if ak ~= "" then state.ai_api_key = ak end
             local au = reaper.GetExtState(S, "ai_api_url")
             if au ~= "" then state.ai_api_url = au end
+            local sv = reaper.GetExtState(S, "sidebar_visible")
+            if sv ~= "" then state.sidebar_visible = sv == "1" end
             local rg = reaper.GetExtState(S, "recent_guids")
             if rg ~= "" then
                 for g in rg:gmatch("[^,]+") do
@@ -463,7 +468,8 @@ No explanation, no markdown, no commentary.]]
                 log(state.error_msg)
                 return
             end
-            state.last_content_h = nil  -- force re-measure
+            state.last_content_h_with_sb = nil  -- force re-measure
+            state.last_content_h_no_sb  = nil
             state.stems = stems
             state.stem_names = {}
             for _, s in ipairs(stems) do
@@ -734,7 +740,7 @@ No explanation, no markdown, no commentary.]]
 
         -- ── defer render loop ──────────────────────────────────────────
         local function loop()
-            local show_sidebar = (state.sidebar_visible ~= false) and (state.show_manifest or (state.scanned and #state.stems > 0))
+            local show_sidebar = state.sidebar_visible
             -- widen minimum when sidebar is active
             local eff_min_w = min_w
             if show_sidebar then
@@ -742,11 +748,13 @@ No explanation, no markdown, no commentary.]]
             end
             -- fully locked to measured content — no resize, auto-adapts to state
             local min_h, max_h, max_w
-            if state.last_content_h then
-                -- measurement from previous frame is accurate → lock
-                min_h = state.last_content_h
+            local cache_key = show_sidebar and "last_content_h_with_sb" or "last_content_h_no_sb"
+            local cached = state[cache_key]
+            if cached then
+                -- measurement from previous frame is accurate → lock; WIDTH-FREE
+                min_h = cached
                 max_h = min_h
-                max_w = eff_min_w
+                max_w = 9999
             else
                 -- first frame after state change: free resize to stabilize
                 min_h = state.scanned and 590 or 395
@@ -796,7 +804,8 @@ No explanation, no markdown, no commentary.]]
                     if ret then
                         local dir = path:gsub("\\", "/"):match("^(.*/)")
                         if dir then
-                            state.last_content_h = nil  -- force re-measure
+                            state.last_content_h_with_sb = nil  -- force re-measure
+                            state.last_content_h_no_sb  = nil
                             state.folder_path = dir
                             state.scanned = false; state.error_msg = nil
                             log("Folder: " .. dir)
@@ -815,7 +824,7 @@ No explanation, no markdown, no commentary.]]
                 ImGui.ImGui_SameLine(ctx, 0, 10)
                 if ImGui.ImGui_Button(ctx, show_sidebar and "◀" or "▶", 22) then
                     state.sidebar_visible = not state.sidebar_visible
-                    state.last_content_h = nil
+                    save_prefs()
                 end
                 ImGui.ImGui_SetNextItemWidth(ctx, -1)
                 local _, _ = ImGui.ImGui_InputText(ctx, "##path", state.folder_path, ImGui.ImGui_InputTextFlags_ReadOnly())
@@ -1192,12 +1201,11 @@ No explanation, no markdown, no commentary.]]
                         ImGui.ImGui_EndChild(ctx)
                     end
                     end  -- closes if sb_open (sidebar BeginChild guard)
-                    state.cached_main_h = main_h
-                    state.last_content_h = main_h + chrome_h
-                else
-                    -- Use cached main_h from when sidebar was deployed for consistent height
-                    local no_sb_h = state.cached_main_h or main_h
-                    state.last_content_h = no_sb_h + chrome_h
+                    if show_sidebar then
+                        state.last_content_h_with_sb = main_h + chrome_h
+                    else
+                        state.last_content_h_no_sb = main_h + chrome_h
+                    end
                 end
 
                 ImGui.ImGui_PopStyleVar(ctx)
