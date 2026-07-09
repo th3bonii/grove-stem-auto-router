@@ -76,6 +76,8 @@ return function(R)
     function R.Overflow._to_lane(stem, track)
         local api = R.Overflow._check_lanes_api()
 
+        local prev_freemode = reaper.GetMediaTrackInfo_Value(track, "I_FREEMODE")
+
         if api == "lanes7" then
             -- REAPER 7+ native Fixed Lanes: enable then place item
             pcall(reaper.SetMediaTrackLanes, track, true)
@@ -97,6 +99,9 @@ return function(R)
         end
 
         R.Import.insert_media(stem.path, track, pos)
+
+        -- Restore previous I_FREEMODE after inserting the overflow item
+        reaper.SetMediaTrackInfo_Value(track, "I_FREEMODE", prev_freemode)
     end
 
     --- Walk the I_FOLDERDEPTH chain upward from a tracked track to find

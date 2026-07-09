@@ -79,12 +79,29 @@ function M.parse(str)
                     local code = tonumber(hex, 16)
                     if not code then return nil, "invalid \\u escape" end
                     pos = pos + 4
+                    -- Handle surrogate pairs (\uD800-\uDBFF followed by \uDC00-\uDFFF)
+                    if code >= 0xD800 and code <= 0xDBFF then
+                        local np = pos + 1
+                        if str:byte(np) == 92 and str:byte(np + 1) == 117 then
+                            local low_hex = str:sub(np + 2, np + 5)
+                            if #low_hex == 4 then
+                                local low_code = tonumber(low_hex, 16)
+                                if low_code and low_code >= 0xDC00 and low_code <= 0xDFFF then
+                                    code = 0x10000 + (code - 0xD800) * 0x400 + (low_code - 0xDC00)
+                                    pos = np + 5
+                                end
+                            end
+                        end
+                    end
                     if code < 0x80 then
                         parts[#parts + 1] = string.char(code)
                     elseif code < 0x800 then
                         parts[#parts + 1] = string.char(0xC0 + math.floor(code / 0x40), 0x80 + (code % 0x40))
-                    else
+                    elseif code < 0x10000 then
                         parts[#parts + 1] = string.char(0xE0 + math.floor(code / 0x1000), 0x80 + (math.floor(code / 0x40) % 0x40), 0x80 + (code % 0x40))
+                    else
+                        -- 4-byte UTF-8 for codepoints above U+FFFF
+                        parts[#parts + 1] = string.char(0xF0 + math.floor(code / 0x40000), 0x80 + (math.floor(code / 0x1000) % 0x40), 0x80 + (math.floor(code / 0x40) % 0x40), 0x80 + (code % 0x40))
                     end
                 else
                     return nil, string.format("invalid escape '\\%c' at %d", esc, pos)

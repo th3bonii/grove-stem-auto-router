@@ -137,7 +137,9 @@ return function(R, JSON)
         if not config then return {} end
         local map = {}
         for k, v in pairs(config.alias or {}) do
-            map[k:lower()] = v
+            if type(k) == "string" then
+                map[k:lower()] = v
+            end
         end
         return map
     end
@@ -147,7 +149,9 @@ return function(R, JSON)
         if not config then return {} end
         local set = {}
         for _, kw in ipairs(config.keywords_ignore or {}) do
-            set[kw:lower()] = true
+            if type(kw) == "string" then
+                set[kw:lower()] = true
+            end
         end
         return set
     end

@@ -29,8 +29,7 @@ return {
             available_tracks = {},  -- { track, name, guid }[]
             assignments      = {},  -- stem_idx -> { track, name }
             recent_guids     = {},  -- ordered GUIDs, most recent first
-            last_content_h_with_sb = nil,  -- content height when sidebar visible
-            last_content_h_no_sb  = nil,  -- content height when sidebar hidden
+            cached_window_h        = nil,  -- canonical window height (set once from sidebar-deployed state)
             sidebar_visible       = true,  -- sidebar toggle state (persisted)
             orphan_data      = nil,  -- { orphans[], matched_count, orphan_count } from R.Orphan.collect()
             show_manifest    = false,  -- toggle for manifest table
@@ -110,8 +109,12 @@ return {
             local assignments = {}
             local matched_count = 0
             for idx, stem in ipairs(stems) do
+                -- Tokenize ONCE per stem and cache on the stem object (avoids 3x tokenize per stem)
+                if not stem._tokens and R.MatchingEngine.tokenize then
+                    stem._tokens = R.MatchingEngine.tokenize(stem.name)
+                end
+                local stem_tokens = stem._tokens
                 -- compute display name (first meaningful token) — local, no stem mutation
-                local stem_tokens = R.MatchingEngine.tokenize and R.MatchingEngine.tokenize(stem.name)
                 local display
                 if stem_tokens and #stem_tokens > 0 then
                     display = stem_tokens[1]
@@ -151,7 +154,10 @@ return {
 
         -- ── AI config persistence helper (shared by scan_folder and _resolve_ai_only) ─
         local function _save_ai_config()
-            local ai_override = R.Config.get_ai_config() or {}
+            -- Deep copy to avoid mutating the live cached config
+            local ai_override = {}
+            local ai_cfg = R.Config.get_ai_config() or {}
+            for k, v in pairs(ai_cfg) do ai_override[k] = v end
             if state.ai_provider ~= "" then ai_override.provider = state.ai_provider end
             if state.ai_model ~= "" then ai_override.model = state.ai_model end
             if state.ai_api_key ~= "" then ai_override.api_key = state.ai_api_key end
@@ -313,21 +319,29 @@ No explanation, no markdown, no commentary.]]
                 end
             end
 
-            -- Write request body to a native Windows temp path so curl.exe can read it
-            local win_temp = os.getenv("TEMP") or os.getenv("TMP") or "C:\\Temp"
+            -- Write request body to a cross-platform temp file
             local req_tag = tostring(os.time()):gsub("%D", "")
-            local req_path = win_temp .. "\\grovereq_" .. req_tag .. ".json"
-            local out_path = win_temp .. "\\groveresp_" .. req_tag .. ".json"
+            local req_path, out_path
+            local os_name = reaper.GetOS and reaper.GetOS() or ""
+            if os_name:match("Win") then
+                local win_temp = os.getenv("TEMP") or os.getenv("TMP") or "C:\\Temp"
+                req_path = win_temp .. "\\grovereq_" .. req_tag .. ".json"
+                out_path = win_temp .. "\\groveresp_" .. req_tag .. ".json"
+            else
+                local tmp_dir = os.getenv("TMPDIR") or os.getenv("TMP") or "/tmp"
+                req_path = tmp_dir .. "/grovereq_" .. req_tag .. ".json"
+                out_path = tmp_dir .. "/groveresp_" .. req_tag .. ".json"
+            end
             local req_f = io.open(req_path, "w")
             if req_f then
                 req_f:write(req_str)
                 req_f:close()
                 local curl_opts = '--max-time ' .. timeout_sec .. ' --connect-timeout 15'
                 -- Simple curl command: -d @file (Windows native path), -o outfile, no pipes
-                local curl_cmd = 'curl -sS ' .. curl_opts .. ' ' .. curl_url
+                local curl_cmd = 'curl -sS ' .. curl_opts .. ' "' .. shdq(curl_url) .. '"'
                     .. ' -H "Content-Type: application/json"'
                     .. curl_auth_header
-                    .. ' -d @"' .. req_path .. '" -o "' .. out_path .. '"'
+                    .. ' -d @"' .. shdq(req_path) .. '" -o "' .. shdq(out_path) .. '"'
                 local exec_ms = math.min(timeout_sec * 1000 + 5000, 120000)
                 local ret, err_out = reaper.ExecProcess(curl_cmd, exec_ms)
                 pcall(os.remove, req_path)
@@ -344,28 +358,33 @@ No explanation, no markdown, no commentary.]]
                         if ok2 and mapping and mapping.assignments then
                             if for_all_stems then
                                 -- Apply AI assignments to state.assignments immediately
+                                -- Build hash indices for O(n) instead of O(n³)
+                                local stem_by_name = {}
+                                for i, s in ipairs(state.stems) do
+                                    stem_by_name[s.name] = i
+                                end
+                                local track_by_name_lower = {}
+                                for _, t in ipairs(state.available_tracks) do
+                                    track_by_name_lower[t.name:lower()] = t
+                                end
                                 local changed = 0
                                 for filename, track_name in pairs(mapping.assignments) do
-                                    for i, s in ipairs(state.stems) do
-                                        if s.name == filename then
-                                            for _, t in ipairs(state.available_tracks) do
-                                                if t.name:lower() == track_name:lower() then
-                                                    local old_name = (state.assignments[i] and state.assignments[i].name) or "?"
-                                                    if old_name ~= t.name then
-                                                        changed = changed + 1
-                                                    end
-                                                    state.assignments[i] = {
-                                                        track = t.track,
-                                                        name = t.name,
-                                                        category = "ai",
-                                                        selected = true,
-                                                        reason = "ai",
-                                                        method = "ai",
-                                                    }
-                                                    break
-                                                end
+                                    local i = stem_by_name[filename]
+                                    if i then
+                                        local t = track_by_name_lower[track_name:lower()]
+                                        if t then
+                                            local old_name = (state.assignments[i] and state.assignments[i].name) or "?"
+                                            if old_name ~= t.name then
+                                                changed = changed + 1
                                             end
-                                            break
+                                            state.assignments[i] = {
+                                                track = t.track,
+                                                name = t.name,
+                                                category = "ai",
+                                                selected = true,
+                                                reason = "ai",
+                                                method = "ai",
+                                            }
                                         end
                                     end
                                 end
@@ -468,8 +487,7 @@ No explanation, no markdown, no commentary.]]
                 log(state.error_msg)
                 return
             end
-            state.last_content_h_with_sb = nil  -- force re-measure
-            state.last_content_h_no_sb  = nil
+            state.cached_window_h       = nil  -- force re-measure
             state.stems = stems
             state.stem_names = {}
             for _, s in ipairs(stems) do
@@ -536,11 +554,17 @@ No explanation, no markdown, no commentary.]]
                 log("ERROR: config failed to load."); state.running = false
                 state.status = "Error"; return
             end
+            -- Clone config before mutation to avoid leaking overrides to live config
+            local cfg = {}
+            for k, v in pairs(config) do cfg[k] = v end
+            config = cfg
             config.overflow_behavior = state.overflow_mode
             config.max_lanes_per_track = state.max_lanes
 
             -- Recompute orphan_data from current assignments (may have changed since scan)
-            state.orphan_data = R.Orphan.collect(state.stems, state.assignments)
+            if R.Orphan and R.Orphan.collect then
+                state.orphan_data = R.Orphan.collect(state.stems, state.assignments)
+            end
 
             if #state.stems == 0 then
                 log("No stems to import."); state.running = false
@@ -629,11 +653,11 @@ No explanation, no markdown, no commentary.]]
                 end
             end
 
-            -- Build set of stems already inserted via Create Selected to prevent AI double-insert
+            -- Track ALL inserted stems (matched + AI + Create Selected) to prevent AI double-insert
             local inserted_stems = {}
             for idx, stem in ipairs(state.stems) do
                 local a = state.assignments[idx]
-                if a and a.track and not a.selected and a.reason == "" then
+                if a and a.track and not a.selected then
                     inserted_stems[stem.path] = true
                 end
             end
@@ -740,28 +764,28 @@ No explanation, no markdown, no commentary.]]
 
         -- ── defer render loop ──────────────────────────────────────────
         local function loop()
-            local show_sidebar = state.sidebar_visible
+            local ok_loop, loop_err = xpcall(function()
+            -- (loop body is now inside xpcall to catch runtime errors)
+            -- error handler: debug.traceback includes line numbers in loop_err
+            -- (passed at line 1245 via xpcall's second argument)
+
+            local show_sidebar = state.sidebar_visible and (state.show_manifest or (state.scanned and #state.stems > 0))
             -- widen minimum when sidebar is active
             local eff_min_w = min_w
             if show_sidebar then
                 eff_min_w = math.max(eff_min_w, min_w + 324 + 4)
             end
-            -- fully locked to measured content — no resize, auto-adapts to state
-            local min_h, max_h, max_w
-            local cache_key = show_sidebar and "last_content_h_with_sb" or "last_content_h_no_sb"
-            local cached = state[cache_key]
-            if cached then
-                -- measurement from previous frame is accurate → lock; WIDTH-FREE
-                min_h = cached
-                max_h = min_h
-                max_w = 9999
+            -- window: fixed size, never user-resizable. Width = eff_min_w (sidebar-aware).
+            -- Height = cached_window_h (canonical, measured once from sidebar-deployed state).
+            local min_h, max_h
+            if state.cached_window_h then
+                min_h = state.cached_window_h; max_h = state.cached_window_h
             else
-                -- first frame after state change: free resize to stabilize
+                -- first frame or after data change: free height to auto-measure
                 min_h = state.scanned and 590 or 395
                 max_h = 9999
-                max_w = 9999
             end
-            ImGui.ImGui_SetNextWindowSizeConstraints(ctx, eff_min_w, min_h, max_w, max_h)
+            ImGui.ImGui_SetNextWindowSizeConstraints(ctx, eff_min_w, min_h, eff_min_w, max_h)
             local main_flags = ImGui.ImGui_WindowFlags_NoCollapse() | ImGui.ImGui_WindowFlags_NoScrollbar()
             local visible, open = ImGui.ImGui_Begin(
                 ctx, WINDOW_TITLE, true,
@@ -804,8 +828,7 @@ No explanation, no markdown, no commentary.]]
                     if ret then
                         local dir = path:gsub("\\", "/"):match("^(.*/)")
                         if dir then
-                            state.last_content_h_with_sb = nil  -- force re-measure
-                            state.last_content_h_no_sb  = nil
+                            state.cached_window_h = nil  -- force re-measure
                             state.folder_path = dir
                             state.scanned = false; state.error_msg = nil
                             log("Folder: " .. dir)
@@ -974,7 +997,7 @@ No explanation, no markdown, no commentary.]]
                     ImGui.ImGui_EndChild(ctx)  -- close ##main_col
                     ImGui.ImGui_SameLine(ctx)
                     -- sidebar height = main content height, so bottom border aligns with log
-                    local sb_open = ImGui.ImGui_BeginChild(ctx, "##sidebar", 324, main_h, 0, 0)
+                    local sb_open = ImGui.ImGui_BeginChild(ctx, "##sidebar", 324, main_h, 0, ImGui.ImGui_WindowFlags_NoScrollbar())
                     if sb_open then
 local sb_full_h = main_h  -- available height is the constrained child height
 local sb_start_y = ImGui.ImGui_GetCursorPosY(ctx)
@@ -1204,10 +1227,9 @@ local sv = ImGui.ImGui_BeginChild(ctx, "##stems", 0, stems_h, 0, stems_flags)
                         ImGui.ImGui_EndChild(ctx)
                     end
                     end  -- closes if sb_open (sidebar BeginChild guard)
-                    if show_sidebar then
-                        state.last_content_h_with_sb = main_h + chrome_h
-                    else
-                        state.last_content_h_no_sb = main_h + chrome_h
+                    -- Cache window height ONCE (canonical). Never overwritten by toggle.
+                    if not state.cached_window_h then
+                        state.cached_window_h = main_h + chrome_h
                     end
                 end
 
@@ -1222,13 +1244,18 @@ local sv = ImGui.ImGui_BeginChild(ctx, "##stems", 0, stems_h, 0, stems_flags)
                 save_prefs()
                 if ImGui.ImGui_DestroyContext then ImGui.ImGui_DestroyContext(ctx) end
             end
+            end, debug.traceback)  -- xpcall close (debug.traceback adds line numbers)
+            if not ok_loop then
+                reaper.ShowConsoleMsg("Grove GUI error: " .. tostring(loop_err) .. "\n")
+                reaper.ShowMessageBox("Grove Stem Auto-Router error:\n\n" .. tostring(loop_err) .. "\n\nSee View → Console for details.", "Grove Error", 0)
+                -- Re-schedule the loop so the GUI recovers from transient errors instead of dying
+                reaper.defer(loop)
+            end
         end
 
         -- ── bootstrap ────────────────────────────────────────────────────
-        -- ── measure what the initial content needs ──
-        local est_h = 395  -- basic UI fits this (no stems yet)
-        ImGui.ImGui_SetNextWindowSize(ctx, min_w, est_h,
-                                      ImGui.ImGui_Cond_Always())
+        -- Initial size: constraints drive width+height auto-fit on first frame
+        -- (no SetNextWindowSize — ImGui auto-sizes to contain all elements)
         load_prefs()
 
         -- greet + cleanup stale orphan/AI files from previous runs

@@ -192,6 +192,9 @@ return function(R)
             reaper.ShowConsoleMsg("Grove: OK " .. basename .. " → " .. len .. "s\n")
         else
             reaper.ShowConsoleMsg("Grove: PCM_Source_CreateFromFile FAILED for: " .. path .. "\n")
+            -- Clean up the zombie item created above to avoid ghost items on the track
+            pcall(reaper.DeleteTrackMediaItem, track, item)
+            return nil
         end
 
         -- Color inheritance: read track custom color and apply to item

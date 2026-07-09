@@ -77,9 +77,11 @@ return function(R)
     function R.MatchingEngine.score(stem_resolved, track_resolved)
         if #stem_resolved == 0 or #track_resolved == 0 then return 0 end
         local shared = 0
+        local matched_track = {}  -- track which track tokens have already been matched
         for _, s_token in ipairs(stem_resolved) do
-            for _, t_token in ipairs(track_resolved) do
-                if s_token == t_token then
+            for ti, t_token in ipairs(track_resolved) do
+                if not matched_track[ti] and s_token == t_token then
+                    matched_track[ti] = true
                     shared = shared + 1
                     break  -- count each stem token at most once
                 end
