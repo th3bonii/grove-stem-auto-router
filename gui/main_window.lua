@@ -37,6 +37,17 @@ return {
             ai_model         = "",  -- GUI-overridden AI model
             ai_api_key       = "",  -- GUI-stored API key (saved to ExtState)
             ai_api_url       = "",  -- custom API base URL
+            -- async scan progress
+            scanning         = false,  -- true during folder scan (sync + any async AI curl)
+            scan_progress    = 0,      -- 0.0–1.0
+            scan_stage       = "",     -- description shown to user
+            -- async AI curl polling
+            ai_polling       = false,  -- true while waiting for background curl
+            ai_poll_start    = nil,    -- os.clock() when polling began
+            ai_timeout_sec   = 90,     -- max seconds to wait for curl
+            ai_req_path      = nil,    -- temp request file (for cleanup)
+            ai_out_path      = nil,    -- temp response file (being polled)
+            ai_for_all       = false,  -- true = for_all_stems, false = orphans-only
         }
 
         local S = "GroveAutoRouter"  -- ExtState section
@@ -166,11 +177,101 @@ return {
             if ov_file then ov_file:write(override_str) ov_file:close() end
         end
 
+        -- ── Apply AI JSON mapping to state.assignments ──
+        local function _apply_ai_mapping(content, for_all_stems, parse_response)
+            if not content or content == "" then
+                log("AI: response file was empty")
+                return
+            end
+            local parsed = parse_response(content)
+            if not parsed or parsed == "" then
+                log("AI: response wasn't valid JSON: " .. (content:sub(1, 120) or "empty"))
+                return
+            end
+            local ok2, mapping = pcall(R.JSON.parse, parsed)
+            if not ok2 or not mapping or not mapping.assignments then
+                log("AI: response missing assignments field")
+                return
+            end
+            if for_all_stems then
+                -- Apply AI assignments to state.assignments immediately
+                local stem_by_name = {}
+                for i, s in ipairs(state.stems) do stem_by_name[s.name] = i end
+                local track_by_name_lower = {}
+                for _, t in ipairs(state.available_tracks) do track_by_name_lower[t.name:lower()] = t end
+                local changed = 0
+                for filename, track_name in pairs(mapping.assignments) do
+                    local i = stem_by_name[filename]
+                    if i then
+                        local t = track_by_name_lower[track_name:lower()]
+                        if t then
+                            if (state.assignments[i] or {}).name ~= t.name then changed = changed + 1 end
+                            state.assignments[i] = {
+                                track = t.track, name = t.name,
+                                category = "ai", selected = true, reason = "ai", method = "ai",
+                            }
+                        end
+                    end
+                end
+                if R.Orphan and R.Orphan.collect then
+                    state.orphan_data = R.Orphan.collect(state.stems, state.assignments)
+                end
+                log("AI: updated " .. changed .. " assignment(s) across all stems")
+            else
+                -- Orphan mode: write mapping.json for import
+                local mapping_str = R.JSON.stringify({ assignments = mapping.assignments, status = "success" })
+                local mf = io.open(R._script_dir .. "mapping.json", "w")
+                if mf then mf:write(mapping_str); mf:close() end
+                local count = 0; for _ in pairs(mapping.assignments) do count = count + 1 end
+                log("AI: " .. count .. " orphan mapping(s) resolved")
+            end
+        end
+
+        -- ── Poll for async AI curl result ──
+        local function _poll_ai_result()
+            if not state.ai_polling then return end
+            local rf = io.open(state.ai_out_path, "r")
+            if rf then
+                local stdout = rf:read("*a"); rf:close()
+                pcall(os.remove, state.ai_out_path)
+                pcall(os.remove, state.ai_req_path)
+                local for_all = state.ai_for_all
+                local parse_fn = state.ai_parse_response
+                state.ai_polling = false
+                state.ai_req_path = nil; state.ai_out_path = nil
+                state.ai_parse_response = nil
+                if parse_fn then
+                    _apply_ai_mapping(stdout, for_all, parse_fn)
+                end
+                state.scanning = false
+                state.scan_progress = 1.0
+                state.scan_stage = ""
+                state.status = "Ready"
+            elseif os.clock() - state.ai_poll_start > state.ai_timeout_sec then
+                log("AI: query timed out — check network, API key, and URL")
+                pcall(os.remove, state.ai_req_path)
+                pcall(os.remove, state.ai_out_path)
+                state.ai_polling = false
+                state.ai_req_path = nil; state.ai_out_path = nil
+                state.ai_parse_response = nil
+                state.scanning = false
+                state.scan_progress = 1.0
+                state.scan_stage = ""
+                state.status = "Ready"
+            else
+                -- Pulse progress while waiting
+                local elapsed = os.clock() - state.ai_poll_start
+                state.scan_progress = 0.7 + math.min(elapsed / state.ai_timeout_sec * 0.25, 0.25)
+                state.scan_stage = "AI: consulting LLM (" .. math.floor(elapsed) .. "s)"
+            end
+        end
+
         -- ── AI curl helper (shared by scan_folder and resolve_ai) ──────────
         -- If for_all_stems is true, sends ALL stems for AI review and updates
         -- state.assignments immediately (used during scan). Otherwise only
         -- sends orphans (for Resolve AI button), writes mapping.json for import.
-        local function _run_ai_curl(for_all_stems)
+        -- When async=true, launches curl in background and polls via defer loop.
+        local function _run_ai_curl(for_all_stems, async)
             if state.ai_api_key == "" then return end
             if not R.JSON or not R.JSON.stringify then return end
             if for_all_stems then
@@ -342,74 +443,38 @@ No explanation, no markdown, no commentary.]]
                     .. ' -H "Content-Type: application/json"'
                     .. curl_auth_header
                     .. ' -d @"' .. shdq(req_path) .. '" -o "' .. shdq(out_path) .. '"'
-                local exec_ms = math.min(timeout_sec * 1000 + 5000, 120000)
-                local ret, err_out = reaper.ExecProcess(curl_cmd, exec_ms)
-                pcall(os.remove, req_path)
-                -- Read response from native Windows temp path
-                local stdout = ""
-                local rf = io.open(out_path, "r")
-                if rf then stdout = rf:read("*a"); rf:close(); pcall(os.remove, out_path) end
-                if not ret then
-                    log("AI: curl command failed — check network, API key, and URL")
-                elseif stdout and stdout ~= "" then
-                    local content = parse_response(stdout)
-                    if content and content ~= "" then
-                        local ok2, mapping = pcall(R.JSON.parse, content)
-                        if ok2 and mapping and mapping.assignments then
-                            if for_all_stems then
-                                -- Apply AI assignments to state.assignments immediately
-                                -- Build hash indices for O(n) instead of O(n³)
-                                local stem_by_name = {}
-                                for i, s in ipairs(state.stems) do
-                                    stem_by_name[s.name] = i
-                                end
-                                local track_by_name_lower = {}
-                                for _, t in ipairs(state.available_tracks) do
-                                    track_by_name_lower[t.name:lower()] = t
-                                end
-                                local changed = 0
-                                for filename, track_name in pairs(mapping.assignments) do
-                                    local i = stem_by_name[filename]
-                                    if i then
-                                        local t = track_by_name_lower[track_name:lower()]
-                                        if t then
-                                            local old_name = (state.assignments[i] and state.assignments[i].name) or "?"
-                                            if old_name ~= t.name then
-                                                changed = changed + 1
-                                            end
-                                            state.assignments[i] = {
-                                                track = t.track,
-                                                name = t.name,
-                                                category = "ai",
-                                                selected = true,
-                                                reason = "ai",
-                                                method = "ai",
-                                            }
-                                        end
-                                    end
-                                end
-                                -- Recompute orphan_data after AI update
-                                if R.Orphan and R.Orphan.collect then
-                                    state.orphan_data = R.Orphan.collect(state.stems, state.assignments)
-                                end
-                                log("AI: updated " .. changed .. " assignment(s) across all stems")
-                            else
-                                -- Orphan mode: write mapping.json for import
-                                local mapping_str = R.JSON.stringify({
-                                    assignments = mapping.assignments, status = "success",
-                                })
-                                local mf = io.open(R._script_dir .. "mapping.json", "w")
-                                if mf then mf:write(mapping_str); mf:close() end
-                                local count = 0
-                                for _ in pairs(mapping.assignments) do count = count + 1 end
-                                log("AI: " .. count .. " orphan mapping(s) resolved")
-                            end
-                        else
-                            log("AI: response wasn't valid JSON: " .. (content:sub(1, 120) or "empty"))
-                        end
+                if async then
+                    -- Launch curl in background and poll via defer loop
+                    local bg_cmd
+                    if os_name:match("Win") then
+                        bg_cmd = 'start /B "" ' .. curl_cmd
+                    else
+                        bg_cmd = curl_cmd .. ' &'
                     end
+                    os.execute(bg_cmd)
+                    -- Set up polling state (response will be processed in _poll_ai_result)
+                    state.ai_polling = true
+                    state.ai_poll_start = os.clock()
+                    state.ai_req_path = req_path
+                    state.ai_out_path = out_path
+                    state.ai_for_all = for_all_stems
+                    state.ai_parse_response = parse_response
+                    log("AI: query launched in background")
                 else
-                    log("AI: response file was empty — ret=" .. tostring(ret))
+                    -- Synchronous curl (blocks UI — used only by _resolve_ai_only)
+                    local exec_ms = math.min(timeout_sec * 1000 + 5000, 120000)
+                    local ret, err_out = reaper.ExecProcess(curl_cmd, exec_ms)
+                    pcall(os.remove, req_path)
+                    local stdout = ""
+                    local rf = io.open(out_path, "r")
+                    if rf then stdout = rf:read("*a"); rf:close(); pcall(os.remove, out_path) end
+                    if not ret then
+                        log("AI: curl command failed — check network, API key, and URL")
+                    elseif stdout and stdout ~= "" then
+                        _apply_ai_mapping(stdout, for_all_stems, parse_response)
+                    else
+                        log("AI: response file was empty — ret=" .. tostring(ret))
+                    end
                 end
             end
         end
@@ -478,15 +543,25 @@ No explanation, no markdown, no commentary.]]
 
         local function scan_folder()
             state.error_msg = nil
+            state.scanning = true
+            state.scan_progress = 0
+            state.status = "Scanning..."
+            state.scan_stage = "Scanning folder..."
+
             local config = R.Config.load() or {}
             local stems = R.Import.scan(state.folder_path)
             if #stems == 0 then
                 state.error_msg = "No audio files found in that folder."
                 state.stems = {}; state.stem_names = {}
-                state.stem_count = 0; state.scanned = false
+                state.stem_count = 0; state.scanned = false; state.scanning = false
+                state.scan_progress = 0; state.scan_stage = ""
+                state.status = "Ready"
                 log(state.error_msg)
                 return
             end
+            state.scan_progress = 0.15
+            state.scan_stage = "Indexing stems..."
+
             state.cached_window_h       = nil  -- force re-measure
             state.stems = stems
             state.stem_names = {}
@@ -494,8 +569,15 @@ No explanation, no markdown, no commentary.]]
                 state.stem_names[#state.stem_names + 1] = s.name
             end
             state.stem_count = #stems
+
+            state.scan_progress = 0.35
+            state.scan_stage = "Collecting tracks..."
+
             state.available_tracks = collect_tracks()
             state.assignments = run_matching(stems, state.available_tracks)
+
+            state.scan_progress = 0.55
+            state.scan_stage = "Identifying orphans..."
             -- Collect orphan data for the orphans section
             if R.Orphan and R.Orphan.collect then
                 state.orphan_data = R.Orphan.collect(stems, state.assignments)
@@ -510,17 +592,27 @@ No explanation, no markdown, no commentary.]]
                 log("Orphan module not loaded — no orphan tracking available.")
             end
 
-            -- Export orphans for AI proxy only if AI is actually configured
-            local ai_cfg_has_key = R.Config.get_ai_config().api_key or state.ai_api_key or ""
-            if state.orphan_data and state.orphan_data.orphan_count > 0
-               and R.Orphan and R.Orphan.export_for_ai
-               and (ai_cfg_has_key ~= "" or state.ai_provider ~= "") then
+            state.scan_progress = 0.70
+            state.scan_stage = "AI: consulting LLM..."
+            state.status = "AI: querying LLM..."
+
+            -- ── AI: call LLM via background curl (non-blocking) ──────────
+            local ai_cfg_key = (R.Config.get_ai_config() or {}).api_key or state.ai_api_key or ""
+            local ai_enabled = (ai_cfg_key ~= "" or state.ai_provider ~= "")
+            if ai_enabled and R.Orphan and R.Orphan.export_for_ai
+               and state.orphan_data and state.orphan_data.orphan_count > 0 then
                 R.Orphan.export_for_ai(state.orphan_data, state.available_tracks, R._script_dir, config)
                 _save_ai_config()
             end
+            _run_ai_curl(true, true)  -- async=true
 
-            -- ── AI: call LLM directly via curl (review ALL stems) ──────────
-            _run_ai_curl(true)
+            -- If no async polling was started (AI disabled or no API key), finish scan immediately
+            if not state.ai_polling then
+                state.scanning = false
+                state.scan_progress = 1.0
+                state.scan_stage = ""
+                state.status = "Ready"
+            end
 
             state.scanned = true
             log("Found " .. #stems .. " stem(s) across " .. #state.available_tracks .. " track(s)")
@@ -767,7 +859,10 @@ No explanation, no markdown, no commentary.]]
             local ok_loop, loop_err = xpcall(function()
             -- (loop body is now inside xpcall to catch runtime errors)
             -- error handler: debug.traceback includes line numbers in loop_err
-            -- (passed at line 1245 via xpcall's second argument)
+            -- (passed via xpcall's second argument)
+
+            -- Poll for async AI curl result every frame
+            _poll_ai_result()
 
             local show_sidebar = state.sidebar_visible and (state.show_manifest or (state.scanned and #state.stems > 0))
             -- widen minimum when sidebar is active
@@ -979,7 +1074,22 @@ No explanation, no markdown, no commentary.]]
                 end
                 ImGui.ImGui_Text(ctx, state.status)
 
-                ImGui.ImGui_Spacing(ctx)
+                -- Progress bar during async scan
+                if state.scanning or state.ai_polling then
+                    local bar_w = ImGui.ImGui_GetContentRegionAvail(ctx)
+                    local bx, by = ImGui.ImGui_GetCursorScreenPos(ctx)
+                    local bar_h = 16
+                    local ok_dl, dl = pcall(ImGui.ImGui_GetWindowDrawList, ctx)
+                    if ok_dl and dl then
+                        ImGui.ImGui_DrawList_AddRectFilled(dl, bx, by, bx + bar_w, by + bar_h, 0x66000000, 4)
+                        local fill_w = bar_w * math.min(state.scan_progress, 1)
+                        if fill_w > 4 then
+                            ImGui.ImGui_DrawList_AddRectFilled(dl, bx, by, bx + fill_w, by + bar_h, 0xE033AA55, 4)
+                        end
+                    end
+                    ImGui.ImGui_SetCursorPosY(ctx, by + bar_h + 2)
+                    ImGui.ImGui_Text(ctx, state.scan_stage)
+                end
 
                 -- ════════════════════════════════════════════════════════
                 --  LOG
