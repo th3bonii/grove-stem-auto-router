@@ -33,6 +33,7 @@ return {
             sidebar_visible       = true,  -- sidebar toggle state (persisted)
             orphan_data      = nil,  -- { orphans[], matched_count, orphan_count } from R.Orphan.collect()
             show_manifest    = false,  -- toggle for manifest table
+            show_heatmap     = false,  -- toggle for heatmap view
             ai_provider      = "",  -- GUI-overridden AI provider (saved to ExtState)
             ai_model         = "",  -- GUI-overridden AI model
             ai_api_key       = "",  -- GUI-stored API key (saved to ExtState)
@@ -62,12 +63,17 @@ return {
             reaper.SetExtState(S, "ai_api_key",    state.ai_api_key or "",    true)
             reaper.SetExtState(S, "ai_api_url",    state.ai_api_url or "",    true)
             reaper.SetExtState(S, "sidebar_visible", state.sidebar_visible and "1" or "0", true)
+            reaper.SetExtState(S, "show_heatmap", state.show_heatmap and "1" or "0", true)
             if #state.recent_guids > 0 then
                 reaper.SetExtState(S, "recent_guids",
                     table.concat(state.recent_guids, ","), true)
             else
                 reaper.SetExtState(S, "recent_guids", "", true)
             end
+            -- Persist UI state to route_map.json (non-critical, best-effort)
+            pcall(R.Config.save_state_block, {
+                heatmap_visible = state.show_heatmap,
+            })
         end
 
         local function load_prefs()
@@ -87,6 +93,8 @@ return {
             if au ~= "" then state.ai_api_url = au end
             local sv = reaper.GetExtState(S, "sidebar_visible")
             if sv ~= "" then state.sidebar_visible = sv == "1" end
+            local hm = reaper.GetExtState(S, "show_heatmap")
+            if hm ~= "" then state.show_heatmap = hm == "1" end
             local rg = reaper.GetExtState(S, "recent_guids")
             if rg ~= "" then
                 for g in rg:gmatch("[^,]+") do
@@ -851,6 +859,10 @@ No explanation, no markdown, no commentary.]]
             if #state.recent_guids > 20 then
                 table.remove(state.recent_guids)
             end
+            -- Wire Learning.record_corrections() after manual reassignment
+            if R.Learning and R.Learning.record_corrections then
+                pcall(R.Learning.record_corrections, state.assignments)
+            end
             save_prefs()
         end
 
@@ -1145,8 +1157,49 @@ if state.show_manifest then
                     -- STEMS (bottom half)
                     if state.scanned and #state.stems > 0 then
                         ImGui.ImGui_Separator(ctx)
-                        ImGui.ImGui_Text(ctx, "STEMS (" .. state.stem_count .. ") — click track to reassign")
+                        -- Heatmap toggle button
+                        ImGui.ImGui_Text(ctx, "STEMS (" .. state.stem_count .. ")")
+                        ImGui.ImGui_SameLine(ctx, 0, 4)
+                        if ImGui.ImGui_Button(ctx, state.show_heatmap and "☰ List" or "▦ Heatmap", 0) then
+                            state.show_heatmap = not state.show_heatmap
+                        end
+                        ImGui.ImGui_SameLine(ctx, 0, 4)
+                        ImGui.ImGui_Text(ctx, "— click track to reassign")
                         local to_delete = {}
+
+                        -- Heatmap view
+                        if state.show_heatmap then
+                            local hm_cols = {"Stem"}
+                            for _, t in ipairs(state.available_tracks) do
+                                hm_cols[#hm_cols + 1] = t.name:sub(1, 8)
+                            end
+                            local hm_h = math.min(#state.stems * 18 + 30, 300)
+                            if ImGui.ImGui_BeginChild(ctx, "##heatmap", 0, hm_h, ImGui.ImGui_ChildFlags_Borders()) then
+                                -- Header row
+                                ImGui.ImGui_Text(ctx, "Stem")
+                                for ci = 2, #hm_cols do
+                                    ImGui.ImGui_SameLine(ctx, ci * 60, 2)
+                                    ImGui.ImGui_TextDisabled(ctx, hm_cols[ci])
+                                end
+                                -- Data rows
+                                for idx, stem in ipairs(state.stems) do
+                                    local a = state.assignments[idx]
+                                    local matched_name = a and a.name or ""
+                                    ImGui.ImGui_Text(ctx, stem.name:sub(1, 16))
+                                    for ti, t in ipairs(state.available_tracks) do
+                                        local is_match = (matched_name == t.name)
+                                        ImGui.ImGui_SameLine(ctx, ti * 60 + 55, 2)
+                                        if is_match then
+                                            ImGui.ImGui_Text(ctx, "●")
+                                        else
+                                            ImGui.ImGui_TextDisabled(ctx, "·")
+                                        end
+                                    end
+                                end
+                            end
+                            ImGui.ImGui_EndChild(ctx)
+                            ImGui.ImGui_Separator(ctx)
+                        end
 
                         -- Sticky header (does not scroll with stems)
                         local cb_col_w = 24
@@ -1230,7 +1283,16 @@ local sv = ImGui.ImGui_BeginChild(ctx, "##stems", 0, stems_h, 0, stems_flags)
                             if orphan_count > 0 then
                                 ImGui.ImGui_Text(ctx, "ORPHANS (" .. orphan_count .. ") — no track match")
                             end
-                            for idx, stem in ipairs(state.stems) do
+                            -- Lazy-load: render in chunks of 50 based on scroll
+                            local scroll_y = ImGui.ImGui_GetScrollY(ctx)
+                            local scroll_max = ImGui.ImGui_GetScrollMaxY(ctx) or 1
+                            local visible_ratio = scroll_y / math.max(scroll_max, 1)
+                            local chunk_size = 50
+                            local total_stems = #state.stems
+                            local start_idx = math.max(1, math.floor(visible_ratio * total_stems) - chunk_size / 2 + 1)
+                            local end_idx = math.min(total_stems, start_idx + chunk_size - 1)
+                            for idx = start_idx, end_idx do
+                                local stem = state.stems[idx]
                                 local a = state.assignments[idx]
                                 local track_name = a and a.name or "(no match)"
                                 local is_orphan = not (a and a.track)

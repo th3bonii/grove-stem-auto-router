@@ -187,4 +187,33 @@ return function(R, JSON)
         if not config then return { provider = "", model = "gpt-4o-mini", timeout_seconds = 30 } end
         return config.ai_config
     end
+
+    --- Persist a UI state block to route_map.json.
+    -- Merges `state_data` into a `_state` key inside the config file.
+    -- @param state_data table — key-value pairs to persist
+    function R.Config.save_state_block(state_data)
+        local path = R._script_dir .. "route_map.json"
+        local file, err = io.open(path, "r")
+        if not file then return false, "cannot open " .. path end
+        local content = file:read("*a"); file:close()
+        local config, parse_err = R.JSON.parse(content)
+        if not config then return false, parse_err end
+        config._state = config._state or {}
+        for k, v in pairs(state_data) do
+            config._state[k] = v
+        end
+        local out = R.JSON.stringify(config)
+        local wf, werr = io.open(path, "w")
+        if not wf then return false, werr end
+        wf:write(out); wf:close()
+        return true
+    end
+
+    --- Restore a previously saved state block from route_map.json.
+    -- @return table — saved state, or empty table
+    function R.Config.get_state_block()
+        local config = R.Config._data
+        if not config or not config._state then return {} end
+        return config._state
+    end
 end
