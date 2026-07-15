@@ -347,7 +347,9 @@ No explanation, no markdown, no commentary.]]
                         local backoff = (attempt + 1) * 2
                         log("AI: curl attempt " .. (attempt + 1) .. "/" .. (max_retries + 1)
                             .. " failed, retrying in " .. backoff .. "s...")
-                        reaper.Sleep(backoff * 1000)  -- ms
+                        -- Sleep via busy-wait (no reaper.Sleep)
+                        local deadline = os.clock() + backoff
+                        while os.clock() < deadline do end
                     end
                 end
                 if not ret then
