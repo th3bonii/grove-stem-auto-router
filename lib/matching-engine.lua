@@ -68,23 +68,43 @@ return function(R)
         return resolved, first_alias
     end
 
+    --- Count shared tokens between two arrays (each idx used once).
+    local function _shared_count(a, b)
+        if #a == 0 or #b == 0 then return 0 end
+        local shared = 0
+        local matched = {}
+        for _, sa in ipairs(a) do
+            for ti, tb in ipairs(b) do
+                if not matched[ti] and sa == tb then
+                    matched[ti] = true
+                    shared = shared + 1
+                    break
+                end
+            end
+        end
+        return shared
+    end
+
     --- Compute token-intersection score: shared tokens / min(a, b).
     -- Each stem token is matched at most once against track tokens.
     -- Returns 0 if either set is empty.
     -- @param stem_resolved table — resolved stem tokens
     -- @param track_resolved table — resolved track tokens
+    -- @param stem_raw table|nil — unresolved stem tokens (for weighted scoring)
+    -- @param track_raw table|nil — unresolved track tokens (for weighted scoring)
     -- @return number — score in [0, 1]
-    function R.MatchingEngine.score(stem_resolved, track_resolved)
+    function R.MatchingEngine.score(stem_resolved, track_resolved, stem_raw, track_raw)
         if #stem_resolved == 0 or #track_resolved == 0 then return 0 end
-        local shared = 0
-        for _, s_token in ipairs(stem_resolved) do
-            for _, t_token in ipairs(track_resolved) do
-                if s_token == t_token then
-                    shared = shared + 1
-                    break  -- count each stem token at most once
-                end
-            end
+        -- When raw tokens provided, use weighted formula:
+        -- alias-resolved matches count 1.0, raw-string matches count 0.3.
+        if stem_raw and track_raw then
+            local alias_shared = _shared_count(stem_resolved, track_resolved)
+            local raw_shared = _shared_count(stem_raw, track_raw)
+            local weighted = alias_shared * 1.0 + math.min(raw_shared, #stem_resolved - alias_shared) * 0.3
+            return math.min(1.0, weighted / math.min(#stem_resolved, #track_resolved))
         end
+        -- Legacy formula for backward compat
+        local shared = _shared_count(stem_resolved, track_resolved)
         return math.min(1.0, shared / math.min(#stem_resolved, #track_resolved))
     end
 
@@ -118,7 +138,7 @@ return function(R)
                 if guid_map[t.guid] then  -- this track is in the calibration set
                     local cal_tokens = R.MatchingEngine.tokenize(t.name)
                     local cal_resolved, _ = R.MatchingEngine.resolve(cal_tokens, config)
-                    local cal_score = R.MatchingEngine.score(stem_resolved, cal_resolved)
+                    local cal_score = R.MatchingEngine.score(stem_resolved, cal_resolved, stem_tokens, cal_tokens)
                     if cal_score > best_cal_score then
                         best_cal_score = cal_score
                         best_cal_track = t.track
@@ -139,7 +159,7 @@ return function(R)
         for _, t in ipairs(tracks) do
             local t_tokens = R.MatchingEngine.tokenize(t.name)
             local t_resolved, _ = R.MatchingEngine.resolve(t_tokens, config)
-            local token_score = R.MatchingEngine.score(stem_resolved, t_resolved)
+            local token_score = R.MatchingEngine.score(stem_resolved, t_resolved, stem_tokens, t_tokens)
             if token_score > best_score then
                 best_score = token_score
                 best_track = t.track
