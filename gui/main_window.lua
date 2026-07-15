@@ -29,7 +29,8 @@ return {
             available_tracks = {},  -- { track, name, guid }[]
             assignments      = {},  -- stem_idx -> { track, name }
             recent_guids     = {},  -- ordered GUIDs, most recent first
-            cached_window_h        = nil,  -- canonical window height (set once from sidebar-deployed state)
+            cached_window_h_sidebar = nil,  -- height when sidebar visible
+            cached_window_h_noside  = nil,  -- height when sidebar hidden
             sidebar_visible       = true,  -- sidebar toggle state (persisted)
             orphan_data      = nil,  -- { orphans[], matched_count, orphan_count } from R.Orphan.collect()
             show_manifest    = false,  -- toggle for manifest table
@@ -570,7 +571,8 @@ No explanation, no markdown, no commentary.]]
             state.scan_progress = 0.15
             state.scan_stage = "Indexing stems..."
 
-            state.cached_window_h       = nil  -- force re-measure
+            state.cached_window_h_sidebar = nil
+            state.cached_window_h_noside = nil
             state.stems = stems
             state.stem_names = {}
             for _, s in ipairs(stems) do
@@ -877,20 +879,35 @@ No explanation, no markdown, no commentary.]]
             _poll_ai_result()
 
             local show_sidebar = state.sidebar_visible and (state.show_manifest or (state.scanned and #state.stems > 0))
+            -- Track sidebar state change to force window resize
+            local sidebar_was_visible = state._sidebar_was_visible
+            if sidebar_was_visible == nil then sidebar_was_visible = show_sidebar end
+            local sidebar_toggled = (sidebar_was_visible ~= show_sidebar)
+            state._sidebar_was_visible = show_sidebar
+
             -- widen minimum when sidebar is active
             local eff_min_w = min_w
             if show_sidebar then
                 eff_min_w = math.max(eff_min_w, min_w + 324 + 4)
             end
-            -- window: fixed size, never user-resizable. Width = eff_min_w (sidebar-aware).
-            -- Height = cached_window_h (canonical, measured once from sidebar-deployed state).
+            -- Force window width when sidebar toggles (constraints alone don't resize)
+            if sidebar_toggled then
+                ImGui.ImGui_SetNextWindowSize(ctx, eff_min_w, -1)
+            end
+            -- window: fixed width (sidebar-aware). Height = per-sidebar-state cached or auto.
             local min_h, max_h
-            if state.cached_window_h then
-                min_h = state.cached_window_h; max_h = state.cached_window_h
+            if show_sidebar then
+                if state.cached_window_h_sidebar then
+                    min_h = state.cached_window_h_sidebar; max_h = state.cached_window_h_sidebar
+                else
+                    min_h = state.scanned and 590 or 395; max_h = 9999
+                end
             else
-                -- first frame or after data change: free height to auto-measure
-                min_h = state.scanned and 590 or 395
-                max_h = 9999
+                if state.cached_window_h_noside then
+                    min_h = state.cached_window_h_noside; max_h = state.cached_window_h_noside
+                else
+                    min_h = state.scanned and 590 or 395; max_h = 9999
+                end
             end
             ImGui.ImGui_SetNextWindowSizeConstraints(ctx, eff_min_w, min_h, eff_min_w, max_h)
             local main_flags = ImGui.ImGui_WindowFlags_NoCollapse() | ImGui.ImGui_WindowFlags_NoScrollbar()
@@ -935,7 +952,8 @@ No explanation, no markdown, no commentary.]]
                     if ret then
                         local dir = path:gsub("\\", "/"):match("^(.*/)")
                         if dir then
-                            state.cached_window_h = nil  -- force re-measure
+                            state.cached_window_h_sidebar = nil
+                            state.cached_window_h_noside = nil
                             state.folder_path = dir
                             state.scanned = false; state.error_msg = nil
                             log("Folder: " .. dir)
@@ -1399,9 +1417,15 @@ local sv = ImGui.ImGui_BeginChild(ctx, "##stems", 0, stems_h, 0, stems_flags)
                         ImGui.ImGui_EndChild(ctx)
                     end
                     end  -- closes if sb_open (sidebar BeginChild guard)
-                    -- Cache window height ONCE (canonical). Never overwritten by toggle.
-                    if not state.cached_window_h then
-                        state.cached_window_h = main_h + chrome_h
+                    -- Cache window height separately for sidebar-visible and sidebar-hidden states
+                    if show_sidebar then
+                        if not state.cached_window_h_sidebar then
+                            state.cached_window_h_sidebar = main_h + chrome_h
+                        end
+                    else
+                        if not state.cached_window_h_noside then
+                            state.cached_window_h_noside = main_h + chrome_h
+                        end
                     end
                 end
 

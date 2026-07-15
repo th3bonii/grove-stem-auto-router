@@ -139,15 +139,22 @@ return function(R)
                     local cal_tokens = R.MatchingEngine.tokenize(t.name)
                     local cal_resolved, _ = R.MatchingEngine.resolve(cal_tokens, config)
                     local cal_score = R.MatchingEngine.score(stem_resolved, cal_resolved, stem_tokens, cal_tokens)
-                    if cal_score > best_cal_score then
+                    -- Require at least one alias-resolved token match for calibrated matching
+                    local alias_shared = 0
+                    for _, sr in ipairs(stem_resolved) do
+                        for _, tr in ipairs(cal_resolved) do
+                            if sr == tr then alias_shared = alias_shared + 1; break end
+                        end
+                    end
+                    if alias_shared > 0 and cal_score > best_cal_score then
                         best_cal_score = cal_score
                         best_cal_track = t.track
                         best_cal_name = t.name
                     end
                 end
             end
-            -- threshold 0.2 = at least one shared token for any reasonable token count
-            if best_cal_score > 0.2 then
+            -- threshold 0.4 = at least one shared alias token (0.2 was too permissive)
+            if best_cal_score >= 0.4 then
                 return best_cal_track, best_cal_name, "calibrated"
             end
         end
@@ -156,18 +163,27 @@ return function(R)
         local best_score = 0
         local best_track = nil
         local best_name = nil
+        local best_alias_shared = 0
         for _, t in ipairs(tracks) do
             local t_tokens = R.MatchingEngine.tokenize(t.name)
             local t_resolved, _ = R.MatchingEngine.resolve(t_tokens, config)
             local token_score = R.MatchingEngine.score(stem_resolved, t_resolved, stem_tokens, t_tokens)
+            -- Count alias matches for this track
+            local alias_shared = 0
+            for _, sr in ipairs(stem_resolved) do
+                for _, tr in ipairs(t_resolved) do
+                    if sr == tr then alias_shared = alias_shared + 1; break end
+                end
+            end
             if token_score > best_score then
                 best_score = token_score
                 best_track = t.track
                 best_name = t.name
+                best_alias_shared = alias_shared
             end
         end
-        -- threshold 0.5 = at least one shared token out of two typical tokens
-        if best_score >= 0.5 then
+        -- threshold 0.5 = at least one shared alias token (raw-only matches capped at 0.3)
+        if best_score >= 0.5 and best_alias_shared > 0 then
             return best_track, best_name, "token-intersection"
         end
 
